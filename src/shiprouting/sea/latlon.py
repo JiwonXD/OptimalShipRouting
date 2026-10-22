@@ -84,8 +84,8 @@ def astar(grid: LatLonGrid, start: tuple[float, float], goal: tuple[float, float
         if c == g:
             break
         for di, dj in MOVES:
-            n = (c[0] + di, c[1] + dj)
-            if not (0 <= n[0] < rows and 0 <= n[1] < cols) or not grid.water[n] or n in closed:
+            n = (c[0] + di, (c[1] + dj) % cols)  # longitude wraps at ±180°
+            if not 0 <= n[0] < rows or not grid.water[n] or n in closed:
                 continue
             cost = best[c] + dist(c, n)
             if cost < best.get(n, math.inf):
@@ -138,8 +138,13 @@ def segments_on_land(land: Land, lat, lon) -> int:
     """Moves whose straight line between cell centres touches land."""
     import shapely
 
-    lines = shapely.linestrings(np.stack([np.column_stack([lon[:-1], lat[:-1]]), np.column_stack([lon[1:], lat[1:]])], axis=1))
-    return int(land.crosses(lines).sum())
+    lon = np.degrees(np.unwrap(np.radians(lon)))  # continuous across ±180°
+    hit = np.zeros(len(lat) - 1, bool)
+    for shift in (0.0, -360.0, 360.0):
+        a = np.column_stack([lon[:-1] + shift, lat[:-1]])
+        b = np.column_stack([lon[1:] + shift, lat[1:]])
+        hit |= land.crosses(shapely.linestrings(np.stack([a, b], axis=1)))
+    return int(hit.sum())
 
 
 def run(land: Land, step: float) -> list[dict]:
