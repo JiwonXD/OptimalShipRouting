@@ -148,9 +148,9 @@ def meet_eta(graph: Graph, s: int, g: int, choice: SpeedChoice, eta_hours: float
     return choice.fill_slack(dataclasses.replace(r, cost=fuel), eta_hours), tries
 
 
-def run(graph: Graph, ship, forecast, speeds_kn, fixed_kn: float, max_tries: int, max_seconds: float) -> list[dict]:
+def run(graph: Graph, ship, forecast, speeds_kn, fixed_kn: float, max_tries: int, max_seconds: float, tables: str | None = None) -> list[dict]:
     """For each test voyage, the moving-weather route at a fixed speed against the least-fuel one
-    choosing speeds that arrives no later."""
+    choosing speeds that arrives no later. Wave tables are kept in the folder `tables` if given."""
     from shiprouting.fuel.waves import AddedResistanceTable
     from shiprouting.sea.latlon import ROUTES
 
@@ -158,9 +158,12 @@ def run(graph: Graph, ship, forecast, speeds_kn, fixed_kn: float, max_tries: int
     costs = {}
     for kn in sorted({*speeds_kn, fixed_kn}):
         t0 = time.perf_counter()
-        waves = AddedResistanceTable.build(ship.seakeeping, kn * KNOT)
+        if tables:
+            waves = AddedResistanceTable.cached(tables, ship.seakeeping, kn * KNOT)
+        else:
+            waves = AddedResistanceTable.build(ship.seakeeping, kn * KNOT)
         costs[kn] = FuelCost(ship, forecast, departure, kn * KNOT, waves, frozen=False)
-        print(f"{kn:g} kn: wave added resistance table built in {time.perf_counter() - t0:.0f} s", flush=True)
+        print(f"{kn:g} kn: wave added resistance table ready in {time.perf_counter() - t0:.0f} s", flush=True)
     fixed, choice = costs[fixed_kn], SpeedChoice([costs[kn] for kn in sorted(speeds_kn)])
     rows = []
     for name, (start, goal) in ROUTES.items():
@@ -212,6 +215,7 @@ def main() -> None:
     parser.add_argument("--fixed-kn", type=float, default=16.0, help="the fixed speed to compare with")
     parser.add_argument("--max-tries", type=int, default=12, help="searches per voyage to meet the arrival time")
     parser.add_argument("--max-seconds", type=float, default=600.0, help="give up a search after this long")
+    parser.add_argument("--tables", help="folder to keep the wave added resistance tables in between runs")
     args = parser.parse_args()
 
     land = load_osm_land_polygons(args.land)
@@ -225,7 +229,7 @@ def main() -> None:
     print(f"graph: {len(graph.lat)} cells, built in {time.perf_counter() - t0:.0f} s", flush=True)
     forecast = ecmwf.load(sorted(glob.glob(args.forecast)))
     speeds = [float(v) for v in args.speeds_kn.split(",")]
-    rows = run(graph, KCS_SHIP, forecast, speeds, args.fixed_kn, args.max_tries, args.max_seconds)
+    rows = run(graph, KCS_SHIP, forecast, speeds, args.fixed_kn, args.max_tries, args.max_seconds, args.tables)
     with open(args.out, "w", encoding="utf-8") as f:
         json.dump(rows, f, ensure_ascii=False)
 

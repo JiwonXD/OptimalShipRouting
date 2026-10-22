@@ -10,7 +10,9 @@ Wave angles are where the waves come from relative to the bow: 0 = head seas,
 π = following seas, either side.
 """
 
+import hashlib
 import math
+import os
 from dataclasses import dataclass
 
 import numpy as np
@@ -199,6 +201,22 @@ class AddedResistanceTable:
         T01 = np.arange(1.0, 20.25, 0.5) if T01 is None else np.asarray(T01, float)
         angle = np.radians(np.arange(0, 181, 5)) if angle is None else np.asarray(angle, float)
         return cls(T01, angle, np.array([[added_resistance(sk, 1.0, t, a, speed, s) for a in angle] for t in T01]))
+
+    @classmethod
+    def cached(cls, folder: str, sk: Seakeeping, speed: float, s: float = 1.0, T01=None, angle=None) -> "AddedResistanceTable":
+        """build, saved in folder and read from there next time. The file is keyed by the arguments
+        and by this module's source, so editing the formulas rebuilds it."""
+        with open(__file__, "rb") as f:
+            source = f.read()
+        key = hashlib.sha256(repr((sk, speed, s, T01, angle)).encode() + source).hexdigest()[:16]
+        path = os.path.join(folder, f"added_resistance_{key}.npz")
+        if os.path.exists(path):
+            with np.load(path) as f:
+                return cls(f["T01"], f["angle"], f["per_Hs2"])
+        table = cls.build(sk, speed, s, T01, angle)
+        os.makedirs(folder, exist_ok=True)
+        np.savez(path, T01=table.T01, angle=table.angle, per_Hs2=table.per_Hs2)
+        return table
 
     def __call__(self, Hs, T01, wave_angle):
         """Added resistance, N, like ``added_resistance`` at the table's speed and spreading; works on arrays."""
