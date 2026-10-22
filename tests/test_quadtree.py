@@ -109,3 +109,13 @@ def test_arcs_across_the_dateline_see_land_on_both_sides():
     land = Land([shapely.box(-180.0, -1.0, -179.9, 1.0), shapely.box(179.0, 10.0, 180.0, 11.0)])
     assert arcs_on_land(land, [0.0, 10.5], [179.5, 178.5], [0.0, 10.5], [-179.5, -178.5]).tolist() == [True, True]
     assert not arcs_on_land(land, 5.0, 179.5, 5.0, -179.5).any()
+
+
+def test_arcs_can_be_required_to_keep_clear_of_land():
+    from shiprouting.sea.quadtree import arcs_on_land
+
+    island = Land([shapely.box(10.0, 0.0, 10.1, 0.1)])
+    # A leg along 0.105°N passes about 0.56 km north of the island.
+    assert not arcs_on_land(island, 0.105, 9.0, 0.105, 11.0).any()
+    assert not arcs_on_land(island, 0.105, 9.0, 0.105, 11.0, clearance_km=0.3).any()
+    assert arcs_on_land(island, 0.105, 9.0, 0.105, 11.0, clearance_km=1.0).all()

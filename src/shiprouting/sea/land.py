@@ -38,6 +38,14 @@ class Land:
         hit[i] = True
         return hit
 
+    def near(self, geoms, distance) -> np.ndarray:
+        """True where the geometry comes within `distance` (degrees, scalar or one per geometry) of land."""
+        geoms = np.asarray(geoms, dtype=object)
+        i, _ = self.tree.query(geoms, predicate="dwithin", distance=distance)
+        hit = np.zeros(geoms.shape, bool)
+        hit[i] = True
+        return hit
+
 
 def load_osm_land_polygons(path) -> Land:
     """Read the OSM land polygons shapefile (or the zip it comes in)."""
