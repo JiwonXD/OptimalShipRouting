@@ -52,7 +52,7 @@ class FuelCost:
     over_mcr: int = 0  # moves that need more than the engine's MCR at this speed (fuel: inf)
     beyond_forecast: int = 0  # moves reached after the forecast's end (weather of its last step)
     seconds: float = 0.0  # spent computing fuel
-    _args: tuple | None = field(default=None, repr=False)  # for kernel.fuel_kg
+    _args: tuple | None = field(default=None, repr=False)  # for kernel.fuel_kg, this speed alone
 
     @property
     def calm_kg_per_km(self) -> float:
@@ -81,13 +81,13 @@ class FuelCost:
             windage, fc = ship.windage, self.forecast
             seconds = fc.time.astype("datetime64[s]").astype(np.float64)
             self._args = (
-                float(np.datetime64(self.time, "s").astype(np.float64)), self.frozen, self.speed,
-                float(ship.resistance(self.speed)),
+                float(np.datetime64(self.time, "s").astype(np.float64)), self.frozen, np.array([self.speed]),
+                np.array([ship.resistance(self.speed)], float),
                 np.array(windage.angles if windage else (0.0, 180.0), float),
                 np.array(windage.C_DA if windage else (0.0, 0.0), float),
                 float(windage.A_XV if windage else 0.0), RHO_AIR,
-                self.waves.T01, self.waves.angle, self.waves.per_Hs2,
-                R_grid, kg_h,
+                self.waves.T01, self.waves.angle, self.waves.per_Hs2[None],
+                R_grid[None], kg_h[None],
                 fc.lat, fc.lon, seconds,
                 *(fc.fields[n] for n in ("wind_u", "wind_v", "Hs", "wave_from_x", "wave_from_y", "T_m10")),
             )  # fmt: skip
@@ -99,17 +99,7 @@ class FuelCost:
         The sea state is that of weather_at and sea_state. Moves that need more than the
         engine's MCR cost inf.
         """
-        args = self._tables()
-        t0 = time.perf_counter()
-        moves = np.broadcast_arrays(*(np.asarray(v, np.float64) for v in (lat_a, lon_a, lat_b, lon_b, hours)))
-        shape = moves[0].shape
-        out, counts = np.empty(moves[0].size), np.zeros(3, np.int64)
-        kernel.fuel_kg(*(np.ascontiguousarray(v).ravel() for v in moves), out, counts, *args)
-        self.no_waves += int(counts[0])
-        self.over_mcr += int(counts[1])
-        self.beyond_forecast += int(counts[2])
-        self.seconds += time.perf_counter() - t0
-        return out.reshape(shape)
+        return fuel_kg([self], self._tables(), lat_a, lon_a, lat_b, lon_b, hours)[0]
 
     def edge_costs(self, graph: Graph, chunk: int = 1_000_000) -> np.ndarray:
         """Fuel, kg, of every move of the graph, aligned with graph.indices, for quadtree.astar."""
@@ -147,6 +137,31 @@ class FuelCost:
         kg = self.kg(lat[a], lon[a], lat[a + 1], lon[a + 1], hours[a])
         return float(kg.sum() + seg_km[on_link].sum() * self.calm_kg_per_km)
 
+
+PER_SPEED = (2, 3, 10, 11, 12)  # in FuelCost._tables: speed, R_hull, per_Hs2, R_grid, kg_h
+
+
+def stacked_tables(costs: list[FuelCost]) -> tuple:
+    """The kernel's arguments for several speeds at once. They must share the forecast, the
+    departure, frozen, the windage and the wave table's grids."""
+    args = [c._tables() for c in costs]
+    return tuple(np.concatenate([a[i] for a in args]) if i in PER_SPEED else args[0][i] for i in range(len(args[0])))
+
+
+def fuel_kg(costs: list[FuelCost], args: tuple, lat_a, lon_a, lat_b, lon_b, hours=0.0) -> np.ndarray:
+    """FuelCost.kg at each of costs' speeds, shape (speeds, *moves); args from stacked_tables."""
+    t0 = time.perf_counter()
+    moves = np.broadcast_arrays(*(np.asarray(v, np.float64) for v in (lat_a, lon_a, lat_b, lon_b, hours)))
+    shape = moves[0].shape
+    out, counts = np.empty((len(costs), moves[0].size)), np.zeros((len(costs), 3), np.int64)
+    kernel.fuel_kg(*(np.ascontiguousarray(v).ravel() for v in moves), out, counts, *args)
+    seconds = (time.perf_counter() - t0) / len(costs)
+    for c, n in zip(costs, counts):
+        c.no_waves += int(n[0])
+        c.over_mcr += int(n[1])
+        c.beyond_forecast += int(n[2])
+        c.seconds += seconds
+    return out.reshape(len(costs), *shape)
 
 def run(graph: Graph, ship: Ship, forecast: Forecast, speed_kn: float, max_seconds: float) -> list[dict]:
     """The shortest route, the fuel-optimal route in frozen weather and the one in moving weather,

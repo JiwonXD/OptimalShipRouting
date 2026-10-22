@@ -2,7 +2,7 @@
 
 It repeats, for scalars, the great-circle formulas (latlon.haversine_km,
 quadtree.along), Forecast.sample, air_resistance and the lookups in the wave
-and fuel-rate tables. Calling numpy on the handful of moves that leave one
+and fuel-rate tables, for one or several speeds. Calling numpy on the handful of moves that leave one
 cell costs far more than the arithmetic itself.
 """
 
@@ -56,14 +56,14 @@ def _abs_angle(a):
 
 @numba.njit(cache=True)
 def fuel_kg(
-    lat_a, lon_a, lat_b, lon_b, hours, out, counts,  # moves, the fuel out, (no waves, over MCR, after forecast)
-    t0, frozen, speed, R_hull,  # departure s, weather frozen at t0?, m/s, calm-water resistance N
+    lat_a, lon_a, lat_b, lon_b, hours, out, counts,  # moves, the fuel out (speeds, moves), per speed (no waves, over MCR, after forecast)
+    t0, frozen, speed, R_hull,  # departure s, weather frozen at t0?, per speed: m/s, calm-water resistance N
     wind_deg, C_DA, A_XV, rho_air,  # windage
-    T01_grid, angle_grid, per_Hs2,  # AddedResistanceTable
-    R_grid, kg_h,  # fuel rate over total resistance, up to MCR
+    T01_grid, angle_grid, per_Hs2,  # AddedResistanceTable, per_Hs2 per speed
+    R_grid, kg_h,  # per speed: fuel rate over total resistance, up to MCR
     lat_grid, lon_grid, t_grid, wind_u, wind_v, Hs_f, from_x, from_y, T_m10,  # forecast
 ):
-    for m in range(len(out)):
+    for m in range(len(lat_a)):
         p0, l0, p1, l1 = math.radians(lat_a[m]), math.radians(lon_a[m]), math.radians(lat_b[m]), math.radians(lon_b[m])
         h = math.sin((p1 - p0) / 2) ** 2 + math.cos(p0) * math.cos(p1) * math.sin((l1 - l0) / 2) ** 2
         km = 2 * EARTH_RADIUS_KM * math.asin(math.sqrt(min(max(h, 0.0), 1.0)))
@@ -76,39 +76,41 @@ def fuel_kg(
         dl = l1 - l0
         heading = math.atan2(math.sin(dl) * math.cos(p1), math.cos(p0) * math.sin(p1) - math.sin(p0) * math.cos(p1) * math.cos(dl))
 
-        t = t0
-        if not frozen:
-            t = t0 + (hours[m] + km / 2 / (speed * 3.6)) * 3600
-            if t > t_grid[-1]:
-                counts[2] += 1
-                t = t_grid[-1]
+        # Every speed at the same midpoint: only the time it is reached differs.
+        for s in range(len(speed)):
+            t = t0
+            if not frozen:
+                t = t0 + (hours[m] + km / 2 / (speed[s] * 3.6)) * 3600
+                if t > t_grid[-1]:
+                    counts[s, 2] += 1
+                    t = t_grid[-1]
 
-        u = sample(wind_u, lat_grid, lon_grid, t_grid, lat, lon, t)
-        v = sample(wind_v, lat_grid, lon_grid, t_grid, lat, lon, t)
-        wind, wind_angle = math.hypot(u, v), math.atan2(-u, -v) - heading
-        ax = -wind * math.cos(wind_angle) - speed  # air velocity relative to the ship, ship axes
-        ay = -wind * math.sin(wind_angle)
-        psi = math.degrees(_abs_angle(math.atan2(-ay, -ax)))
-        R = R_hull + 0.5 * rho_air * np.interp(psi, wind_deg, C_DA) * A_XV * (ax * ax + ay * ay)
+            u = sample(wind_u, lat_grid, lon_grid, t_grid, lat, lon, t)
+            v = sample(wind_v, lat_grid, lon_grid, t_grid, lat, lon, t)
+            wind, wind_angle = math.hypot(u, v), math.atan2(-u, -v) - heading
+            ax = -wind * math.cos(wind_angle) - speed[s]  # air velocity relative to the ship, ship axes
+            ay = -wind * math.sin(wind_angle)
+            psi = math.degrees(_abs_angle(math.atan2(-ay, -ax)))
+            R = R_hull[s] + 0.5 * rho_air * np.interp(psi, wind_deg, C_DA) * A_XV * (ax * ax + ay * ay)
 
-        Hs = sample(Hs_f, lat_grid, lon_grid, t_grid, lat, lon, t)
-        if math.isnan(Hs):
-            counts[0] += 1
-        elif Hs > 0:
-            T01 = T01_PER_TM10 * sample(T_m10, lat_grid, lon_grid, t_grid, lat, lon, t)
-            T01 = min(max(T01, T01_grid[0]), T01_grid[-1])
-            wave_from = math.atan2(
-                sample(from_x, lat_grid, lon_grid, t_grid, lat, lon, t), sample(from_y, lat_grid, lon_grid, t_grid, lat, lon, t)
-            )
-            i, wt = _cell(T01_grid, T01)
-            j, wa = _cell(angle_grid, _abs_angle(wave_from - heading))
-            f = (1 - wt) * ((1 - wa) * per_Hs2[i, j] + wa * per_Hs2[i, j + 1]) + wt * (
-                (1 - wa) * per_Hs2[i + 1, j] + wa * per_Hs2[i + 1, j + 1]
-            )
-            R += Hs * Hs * f
+            Hs = sample(Hs_f, lat_grid, lon_grid, t_grid, lat, lon, t)
+            if math.isnan(Hs):
+                counts[s, 0] += 1
+            elif Hs > 0:
+                T01 = T01_PER_TM10 * sample(T_m10, lat_grid, lon_grid, t_grid, lat, lon, t)
+                T01 = min(max(T01, T01_grid[0]), T01_grid[-1])
+                wave_from = math.atan2(
+                    sample(from_x, lat_grid, lon_grid, t_grid, lat, lon, t), sample(from_y, lat_grid, lon_grid, t_grid, lat, lon, t)
+                )
+                i, wt = _cell(T01_grid, T01)
+                j, wa = _cell(angle_grid, _abs_angle(wave_from - heading))
+                f = (1 - wt) * ((1 - wa) * per_Hs2[s, i, j] + wa * per_Hs2[s, i, j + 1]) + wt * (
+                    (1 - wa) * per_Hs2[s, i + 1, j] + wa * per_Hs2[s, i + 1, j + 1]
+                )
+                R += Hs * Hs * f
 
-        if R > R_grid[-1]:
-            counts[1] += 1
-            out[m] = math.inf
-        else:
-            out[m] = np.interp(R, R_grid, kg_h) * km / (speed * 3.6)
+            if R > R_grid[s, -1]:
+                counts[s, 1] += 1
+                out[s, m] = math.inf
+            else:
+                out[s, m] = np.interp(R, R_grid[s], kg_h[s]) * km / (speed[s] * 3.6)
