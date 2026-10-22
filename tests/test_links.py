@@ -1,3 +1,5 @@
+import json
+
 import numpy as np
 import pytest
 import shapely
@@ -48,3 +50,14 @@ def test_link_ends_join_a_cell_across_open_water_not_over_a_cape():
     grid = LatLonGrid.build(Land([cape]), 1.0, lat_limits=(-90.0, 90.0), links=[canal])
     a, _, _ = grid.links[0]
     assert grid.center(*a) == (11.5, 9.5)
+
+
+def test_load_links_keeps_only_the_named_seamark_type(tmp_path, monkeypatch):
+    from shiprouting.sea import links
+
+    lane = way([1, 2, 3], [(0.0, 0.0), (0.5, 0.1), (1.0, 0.0)]) | {"type": "way", "tags": {"seamark:type": "separation_lane"}}
+    line = way([1, 4, 3], [(0.0, 0.0), (0.5, 0.0), (1.0, 0.0)]) | {"type": "way", "tags": {"seamark:type": "separation_line"}}
+    (tmp_path / "strait.json").write_text(json.dumps({"elements": [lane, line]}), encoding="utf-8")
+    monkeypatch.setattr(links, "LINKS", {"해협": ("strait.json", (0.0, 0.0), (1.0, 0.0), "separation_lane")})
+    (link,) = links.load_links(tmp_path)
+    assert link.lon.tolist() == [0.0, 0.1, 0.0]  # along the lane, not the shorter separation line

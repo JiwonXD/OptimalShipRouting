@@ -232,14 +232,14 @@ def main() -> None:
     parser.add_argument("land", help="land polygons shapefile")
     parser.add_argument("out", help="results .json")
     parser.add_argument("--min-step", type=float, action="append", help="smallest cell side in degrees (repeatable)")
-    parser.add_argument("--canals", help="folder with the Overpass canal files (see links.CANALS)")
+    parser.add_argument("--links", help="folder with the Overpass canal and strait files (see links.LINKS)")
     args = parser.parse_args()
     land = load_osm_land_polygons(args.land)
     links = []
-    if args.canals:
-        from shiprouting.sea.links import load_canals
+    if args.links:
+        from shiprouting.sea.links import load_links
 
-        links = load_canals(args.canals)
+        links = load_links(args.links)
     rows = [row for step in args.min_step or [1 / 32] for row in run(land, step, links)]
     with open(args.out, "w", encoding="utf-8") as f:
         json.dump(rows, f, ensure_ascii=False)

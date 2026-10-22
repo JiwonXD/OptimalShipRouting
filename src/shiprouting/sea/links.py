@@ -3,7 +3,8 @@
 A link is a polyline the ship follows from end to end; its cost is its length.
 The geometry comes from OpenStreetMap ways (Overpass JSON with `out geom`),
 chained through shared nodes from the node nearest one sea end to the node
-nearest the other.
+nearest the other. Canals use the canal centreline; a strait narrower than
+the grid's smallest cells uses its traffic separation lane.
 """
 
 import heapq
@@ -14,10 +15,12 @@ import numpy as np
 
 from shiprouting.sea.latlon import haversine_km
 
-# Sea ends (lat, lon) of each canal, and the Overpass file holding its ways.
-CANALS = {
-    "수에즈": ("canals_suez.json", (31.2757, 32.3263), (29.9303, 32.5607)),
-    "파나마": ("canals_panama.json", (8.9429, -79.5647), (9.3115, -79.9198)),
+# The Overpass file holding each waterway's ways, its sea ends (lat, lon), and the
+# seamark:type of the ways to use (None: all of them).
+LINKS = {
+    "수에즈": ("canals_suez.json", (31.2757, 32.3263), (29.9303, 32.5607), None),
+    "파나마": ("canals_panama.json", (8.9429, -79.5647), (9.3115, -79.9198), None),
+    "보스포루스": ("straits_bosporus.json", (41.226, 29.131), (40.979, 28.989), "separation_lane"),
 }
 
 
@@ -69,11 +72,12 @@ def chain(name: str, ways: list[dict], a: tuple[float, float], b: tuple[float, f
     return Link(name, lat, lon)
 
 
-def load_canals(osm_dir) -> list[Link]:
+def load_links(osm_dir) -> list[Link]:
     from pathlib import Path
 
     links = []
-    for name, (file, a, b) in CANALS.items():
+    for name, (file, a, b, kind) in LINKS.items():
         data = json.loads((Path(osm_dir) / file).read_text(encoding="utf-8"))
-        links.append(chain(name, [e for e in data["elements"] if e["type"] == "way"], a, b))
+        ways = [e for e in data["elements"] if e["type"] == "way" and kind in (None, e.get("tags", {}).get("seamark:type"))]
+        links.append(chain(name, ways, a, b))
     return links
