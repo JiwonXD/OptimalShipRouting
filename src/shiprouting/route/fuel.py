@@ -3,8 +3,9 @@
 The ship sails at one fixed speed through the water. A move costs the fuel
 burnt over it, from the sea state at the move's midpoint in the forecast at the
 departure time: the weather is frozen for the whole voyage, and currents are
-left out. Links (canals, straits) are taken at the calm-water rate. The A*
-heuristic is the calm-water fuel for the great-circle distance left.
+left out. Links (canals, straits) are taken at the calm-water rate. The search
+has no heuristic (Dijkstra): a following wind makes some moves cheaper than
+calm water, so calm-water fuel for the distance left is not a lower bound.
 
 With the weather frozen, every move's fuel is fixed before the search starts,
 so it is computed for all moves at once, on arrays. At a fixed speed the fuel
@@ -111,10 +112,6 @@ class FuelCost:
     def link_cost(self, link, km: float) -> float:
         return km * self.calm_kg_per_km
 
-    def heuristic(self, graph: Graph, g: int):
-        per_km = self.calm_kg_per_km
-        return lambda n: per_km * float(haversine_km(graph.lat[n], graph.lon[n], graph.lat[g], graph.lon[g]))
-
     def path(self, lat, lon, on_link) -> float:
         """Fuel, kg, along a path, links at the calm-water rate."""
         sea = ~on_link
@@ -137,12 +134,6 @@ def run(graph: Graph, ship: Ship, forecast: Forecast, speed_kn: float, max_secon
         f" (no wave data: {cost.no_waves}, beyond MCR: {cost.over_mcr})",
         flush=True,
     )
-    per_km = edge_kg / graph.km
-    print(
-        f"moves cheaper per km than calm water: {int((per_km < cost.calm_kg_per_km).sum())}"
-        f" (lowest {per_km.min() / cost.calm_kg_per_km:.3f} of calm)",
-        flush=True,
-    )
     rows = []
     for name, (start, goal) in ROUTES.items():
         s, g = graph.nearest(*start), graph.nearest(*goal)
@@ -157,7 +148,7 @@ def run(graph: Graph, ship: Ship, forecast: Forecast, speed_kn: float, max_secon
             shortest_seconds=round(shortest.seconds, 1),
         )
         try:
-            r = astar(graph, s, g, edge_kg, cost.link_cost, cost.heuristic(graph, g), max_seconds)
+            r = astar(graph, s, g, edge_kg, cost.link_cost, lambda n: 0.0, max_seconds)
         except (ValueError, TimeoutError) as e:
             row["error"] = str(e)
         else:
@@ -173,10 +164,6 @@ def run(graph: Graph, ship: Ship, forecast: Forecast, speed_kn: float, max_secon
             before = cost.no_waves
             cost.path(r.lat, r.lon, r.on_link)
             row["fuel_no_waves"] = f"{cost.no_waves - before}/{int((~r.on_link).sum())}"
-            # Without the heuristic (Dijkstra) the result is optimal whatever the heuristic overestimates.
-            exact = astar(graph, s, g, edge_kg, cost.link_cost, lambda n: 0.0)
-            row.update(exact_fuel_t=round(exact.cost / 1000, 2), exact_km=round(exact.km), exact_expanded=exact.expanded,
-                       exact_seconds=round(exact.seconds, 1))
         print({k: v for k, v in row.items() if k not in ("lat", "lon")}, flush=True)
         rows.append(row)
     return rows
