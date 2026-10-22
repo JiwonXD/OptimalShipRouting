@@ -109,3 +109,19 @@ def test_moving_search_in_steady_weather_matches_the_frozen_one(graph):
     b = astar(graph, s, g, moving.moving_costs(graph), moving.link_cost, lambda n: 0.0)
     assert b.cost == pytest.approx(a.cost)
     assert b.cost == pytest.approx(moving.path(b.lat, b.lon, b.on_link))
+
+
+def test_kernel_sample_matches_the_forecast():
+    from shiprouting.route.kernel import sample
+
+    rng = np.random.default_rng(0)
+    fc = forecast()
+    field = rng.normal(size=fc.fields["Hs"].shape)
+    field[:, 100:103, 10:13] = np.nan  # a patch of land: (10.9, 11.4) is inside it, NaN both ways
+    fc.fields["Hs"] = field
+    seconds = fc.time.astype(np.float64)
+    for lat, lon, h in [(10.3, 150.7, 2.5), (10.9, 11.4, 1.0), (-35.2, 179.8, 6.0), (-35.2, -179.6, 0.0), (89.9, 0.1, 3.0)]:
+        t = T0 + np.timedelta64(int(h * 3600), "s")
+        expected = fc.sample("Hs", lat, lon, t)
+        got = sample(field, fc.lat, fc.lon, seconds, lat, lon, float(t.astype(np.float64)))
+        assert got == pytest.approx(float(expected), nan_ok=True)
