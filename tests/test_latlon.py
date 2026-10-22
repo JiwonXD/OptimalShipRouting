@@ -2,7 +2,7 @@ import pytest
 import shapely
 
 from shiprouting.sea.land import Land
-from shiprouting.sea.latlon import LatLonGrid, astar, haversine_km
+from shiprouting.sea.latlon import MOVES, LatLonGrid, astar, haversine_km
 
 LAND = Land([shapely.box(0.0, 0.0, 20.0, 20.0)])
 
@@ -65,3 +65,29 @@ def test_diagonal_moves_do_not_cut_land_corners(grid):
     # must step through (-0.5, -0.5) instead of jumping diagonally over the land corner.
     r = astar(grid, (-0.5, 0.5), (0.5, -0.5))
     assert list(zip(r.lat, r.lon)) == [(-0.5, 0.5), (-0.5, -0.5), (0.5, -0.5)]
+
+
+def test_moves_across_land_between_two_water_cells_are_blocked():
+    # A thin island between the centres at 9.5°E and 10.5°E: both cells are water.
+    land = Land([shapely.box(9.9, -5.0, 10.1, 5.0)])
+    g = LatLonGrid.build(land, 1.0)
+    assert g.water[g.cell(0.5, 9.5)] and g.water[g.cell(0.5, 10.5)]
+    r = astar(g, (0.5, 9.5), (0.5, 10.5))
+    assert r.lat.max() > 5.0 or r.lat.min() < -5.0  # around the island's end
+
+
+def test_diagonal_strait_between_two_land_cells_stays_open():
+    # Land covers the centres north-west and south-east of the move, but the line misses it.
+    land = Land([shapely.box(0.1, 1.05, 0.9, 1.9), shapely.box(1.05, 0.1, 1.9, 0.9)])
+    g = LatLonGrid.build(land, 1.0)
+    assert not g.water[g.cell(1.5, 0.5)] and not g.water[g.cell(0.5, 1.5)]
+    assert g.moves[g.cell(0.5, 0.5)][MOVES.index((1, 1))]
+    assert g.moves[g.cell(1.5, 1.5)][MOVES.index((-1, -1))]
+
+
+def test_moves_wrap_and_see_land_across_the_dateline():
+    land = Land([shapely.box(-180.0, -5.0, -179.9, 5.0)])
+    g = LatLonGrid.build(land, 1.0)
+    assert not g.moves[g.cell(0.5, 179.5)][MOVES.index((0, 1))]
+    assert g.moves[g.cell(10.5, 179.5)][MOVES.index((0, 1))]
+    assert not g.moves[g.cell(0.5, -179.5)][MOVES.index((0, -1))]

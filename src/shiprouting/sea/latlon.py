@@ -1,9 +1,10 @@
 """First attempt at sea routing: a regular latitude/longitude grid and A*.
 
 A cell is water when its centre is not on land. The ship moves to any of the
-8 neighbouring cells; the cost of a move is the great-circle distance between
-the cell centres, and A* uses the great-circle distance to the goal as its
-heuristic.
+8 neighbouring water cells as long as the straight line between the two
+centres does not touch land; the cost of a move is the great-circle distance
+between the cell centres, and A* uses the great-circle distance to the goal
+as its heuristic.
 """
 
 import heapq
@@ -34,6 +35,7 @@ def haversine_km(lat1, lon1, lat2, lon2):
 class LatLonGrid:
     step: float  # cell size, degrees
     water: np.ndarray  # (rows, cols) bool; row 0 is the southernmost
+    moves: np.ndarray  # (rows, cols, 8) bool; MOVES[k] from the cell is open
 
     @classmethod
     def build(cls, land: Land, step: float, lat_limits: tuple[float, float] = ICE_FREE) -> "LatLonGrid":
@@ -42,13 +44,40 @@ class LatLonGrid:
         lon2, lat2 = np.meshgrid(lon, lat)
         water = ~land.contains(lat2.ravel(), lon2.ravel()).reshape(lat2.shape)
         water &= (lat2 >= lat_limits[0]) & (lat2 <= lat_limits[1])
-        return cls(step, water)
+        return cls(step, water, open_moves(land, water, lat2, lon2, step))
 
     def center(self, i: int, j: int) -> tuple[float, float]:
         return -90 + self.step * (i + 0.5), -180 + self.step * (j + 0.5)
 
     def cell(self, lat: float, lon: float) -> tuple[int, int]:
         return int((lat + 90) // self.step), int((lon + 180) // self.step)
+
+
+def open_moves(land: Land, water, lat2, lon2, step: float) -> np.ndarray:
+    """For every cell and move, whether both ends are water and the line between them misses land."""
+    import shapely
+
+    rows, cols = water.shape
+    moves = np.zeros((rows, cols, len(MOVES)), bool)
+    for k, (di, dj) in enumerate(MOVES):
+        if (-di, -dj) in MOVES[:k]:
+            continue  # same lines as the opposite move, filled in below
+        ends = np.zeros_like(water)
+        src = (slice(max(0, -di), rows - max(0, di)), slice(None))
+        dst = (slice(max(0, di), rows - max(0, -di)), slice(None))
+        ends[src] = water[src] & np.roll(water, -dj, axis=1)[dst]
+        i, j = np.nonzero(ends)
+        a = np.column_stack([lon2[i, j], lat2[i, j]])
+        b = a + [dj * step, di * step]  # may run past ±180°; land beyond is checked shifted back
+        lines = shapely.linestrings(np.stack([a, b], axis=1))
+        hit = land.crosses(lines)
+        for shift, past in ((-360.0, b[:, 0] > 180), (360.0, b[:, 0] < -180)):
+            if past.any():
+                hit[past] |= land.crosses(shapely.transform(lines[past], lambda xy: xy + [shift, 0]))
+        ok = ~hit
+        moves[i, j, k] = ok
+        moves[i + di, (j + dj) % cols, MOVES.index((-di, -dj))] = ok
+    return moves
 
 
 @dataclass(frozen=True)
@@ -62,7 +91,7 @@ class SearchResult:
 
 def astar(grid: LatLonGrid, start: tuple[float, float], goal: tuple[float, float]) -> SearchResult:
     t0 = time.perf_counter()
-    rows, cols = grid.water.shape
+    cols = grid.water.shape[1]
     s, g = grid.cell(*start), grid.cell(*goal)
     for name, c in (("start", s), ("goal", g)):
         if not grid.water[c]:
@@ -88,12 +117,9 @@ def astar(grid: LatLonGrid, start: tuple[float, float], goal: tuple[float, float
         expanded += 1
         if c == g:
             break
-        for di, dj in MOVES:
+        for k, (di, dj) in enumerate(MOVES):
             n = (c[0] + di, (c[1] + dj) % cols)  # longitude wraps at ±180°
-            if not 0 <= n[0] < rows or not grid.water[n] or n in closed:
-                continue
-            # A diagonal move must not cut a corner: both cells it passes between must be water.
-            if di and dj and not (grid.water[c[0] + di, c[1]] and grid.water[c[0], n[1]]):
+            if not grid.moves[c][k] or n in closed:
                 continue
             cost = best[c] + dist(c, n)
             if cost < best.get(n, math.inf):
