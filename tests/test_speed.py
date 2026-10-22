@@ -7,7 +7,7 @@ import shapely
 from shiprouting.fuel.ships import KCS_SEAKEEPING, KCS_SHIP
 from shiprouting.fuel.waves import AddedResistanceTable
 from shiprouting.route.fuel import KNOT, FuelCost
-from shiprouting.route.speed import SpeedChoice
+from shiprouting.route.speed import SpeedChoice, eta_search
 from shiprouting.sea.land import Land
 from shiprouting.sea.quadtree import Graph, astar
 from test_fuel_route import T0, forecast
@@ -28,3 +28,18 @@ def test_without_an_arrival_time_the_slowest_speed_wins():
     assert np.allclose(sc.speeds_kn(r), 12.0)
     assert r.clock[-1] == pytest.approx(r.km / (12 * 1.852))
     assert r.cost == pytest.approx(sc.path(r))
+
+
+def test_eta_search_meets_the_arrival_time_with_less_fuel_than_a_fixed_speed():
+    graph = Graph.build(Land([shapely.box(100.0, 30.0, 101.0, 31.0)]), root=1.0, min_step=0.5, lat_limits=(-20.0, 20.0))
+    sc = choice(forecast(wind_u=-10.0, Hs=2.0, wave_from_x=1.0, T_m10=8.0), (12, 14, 16, 18))
+    s, g = graph.nearest(0.5, 150.5), graph.nearest(0.5, 156.5)
+    fixed = sc.costs[2]  # 16 kn
+    r16 = astar(graph, s, g, fixed.costs(graph), fixed.link_cost, lambda n: 0.0)
+    eta = r16.clock[-1] + 0.5
+    r = eta_search(graph, s, g, sc, eta, bin_hours=0.5)
+    assert r.clock[-1] <= eta
+    assert r.cost <= r16.cost
+    assert r.cost == pytest.approx(sc.path(r))
+    with pytest.raises(ValueError):
+        eta_search(graph, s, g, sc, r16.km / (18 * 1.852) * 0.9)
