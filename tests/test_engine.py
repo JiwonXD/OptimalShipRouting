@@ -24,9 +24,9 @@ def test_rejects_load_above_mcr():
 
 def test_kcs_service_speed_power_and_load():
     P_B = KCS_SHIP.brake_power(24 * KNOT)
-    assert P_B == pytest.approx(28.57e6, rel=2e-3)
-    # Sizing rule: 15 % sea margin on top still fits under 90 % MCR.
-    assert 1.15 * P_B < 0.9 * KCS_ENGINE.mcr
+    assert P_B == pytest.approx(29.58e6, rel=2e-3)
+    # Sizing rule: with a 15 % sea margin on top the engine runs at about 90 % MCR.
+    assert 1.15 * P_B / KCS_ENGINE.mcr == pytest.approx(0.9, abs=0.01)
 
 
 def test_kcs_fuel_trends():

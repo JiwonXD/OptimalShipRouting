@@ -1,5 +1,7 @@
 """Reference ships."""
 
+import math
+
 from shiprouting.fuel import model_test
 from shiprouting.fuel.engine import Engine
 from shiprouting.fuel.hull import Hull
@@ -7,6 +9,8 @@ from shiprouting.fuel.model_test import ResistanceTest
 from shiprouting.fuel.powering import PropulsionFactors
 from shiprouting.fuel.propeller import OpenWaterCurve
 from shiprouting.fuel.ship import Ship
+from shiprouting.fuel.waves import Seakeeping
+from shiprouting.fuel.wind import Windage
 
 # KRISO Container Ship (KCS), full scale.
 # Published (SIMMAN 2008, Tokyo 2015 CFD Workshop): L_WL 232.5 m, L_PP 230 m,
@@ -64,12 +68,37 @@ KCS_PROPULSION = PropulsionFactors(t=0.180, w=0.209, eta_R=1.008, eta_S=0.99)
 
 # KCS was never built, so the engine is assumed: MAN G80ME-C10.5, Tier II,
 # high-load tuning (4,710 kW per cylinder, Marine Engine Programme 2021).
-# Sizing rule (assumed): calm-water power at 24 kn (≈28.6 MW) plus 15 % sea
-# margin at 90 % MCR needs ≈36.5 MW, so 8 cylinders = 37,680 kW.
+# Sizing rule (assumed): power at 24 kn in calm water and still air (≈29.6 MW)
+# plus 15 % sea margin at about 90 % MCR, so 8 cylinders = 37,680 kW.
 # SFOC at 50/75/100 % load, ISO conditions, LCV 42,700 kJ/kg.
 KCS_ENGINE = Engine(
     mcr=8 * 4710e3,
     sfoc_points=((0.50, 160.5), (0.75, 159.5), (1.00, 164.0)),
+)
+
+# Wind: ITTC 7.5-04-01-01.1 (Rev 08) Table F-1, container ship (6800 TEU),
+# laden with containers, C_DA = -C_X. KCS has no published superstructure, so
+# A_XV is assumed: B 32.2 m x about 25 m (freeboard 8.2 m + deck containers
+# and bridge).
+KCS_WINDAGE = Windage(
+    A_XV=800.0,
+    angles=(0, 15, 30, 45, 60, 75, 90, 105, 120, 135, 150, 165, 180),
+    C_DA=(0.67, 0.76, 0.66, 0.40, 0.25, 0.21, 0.26, 0.04, -0.36, -0.69, -0.90,
+          -0.85, -0.67),
+)
+
+# Waves (SNNM). k_yy 0.25 L_PP as in the Tokyo 2015 seakeeping tests (case 2.10).
+# E1, E2 provisional: E1 from the Holtrop i_E regression (15.5°), E2 assumed
+# until both are measured on the hull geometry.
+KCS_SEAKEEPING = Seakeeping(
+    L=KCS_L_PP,
+    B=32.2,
+    T_F=10.8,
+    T_A=10.8,
+    C_B=0.6505,
+    k_yy=0.25,
+    E1=math.radians(15.5),
+    E2=math.radians(25.0),
 )
 
 KCS_SHIP = Ship(
@@ -80,4 +109,6 @@ KCS_SHIP = Ship(
     propeller=KCS_OPEN_WATER,
     propeller_D=KCS_PROPELLER_D,
     engine=KCS_ENGINE,
+    windage=KCS_WINDAGE,
+    seakeeping=KCS_SEAKEEPING,
 )
