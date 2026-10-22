@@ -16,9 +16,10 @@ from shiprouting.fuel.wind import Windage
 # Published (SIMMAN 2008, Tokyo 2015 CFD Workshop): L_WL 232.5 m, L_PP 230 m,
 # B 32.2 m, T 10.8 m, volume 52030 m³, C_M 0.9849, LCB -1.48 % L_PP,
 # rudder wetted area 115 m², bare-hull wetted surface 9424 m² (T2015).
-# Not found in the sources read, so these are provisional until derived from
-# the hull geometry: C_WP (set so the Holtrop wetted surface is within 0.5 %
-# of 9424 m²), A_BT, h_B, A_T (transom assumed dry at rest), C_stern, k2.
+# Measured on the hull IGES (KCS_hull_SVA.igs) at T = 10.8 m: C_WP 0.8221 on
+# L_WL 232.45 m, bulb section at the FP A_BT 29.33 m² with centroid h_B 5.23 m,
+# transom dry at rest (A_T 0). The same mesh reproduces volume (+0.04 %), LCB
+# and C_M. Assumed: C_stern (normal sections), k2.
 KCS = Hull(
     L=232.5,
     B=32.2,
@@ -27,9 +28,9 @@ KCS = Hull(
     volume=52030.0,
     lcb=-1.48 * 230.0 / 232.5,
     C_M=0.9849,
-    C_WP=0.82,
-    A_BT=27.0,
-    h_B=4.3,
+    C_WP=0.8221,
+    A_BT=29.33,
+    h_B=5.23,
     A_T=0.0,
     S_APP=115.0,
     k2=1.5,
@@ -88,8 +89,9 @@ KCS_WINDAGE = Windage(
 )
 
 # Waves (SNNM). k_yy 0.25 L_PP as in the Tokyo 2015 seakeeping tests (case 2.10).
-# E1, E2 provisional: E1 from the Holtrop i_E regression (15.5°), E2 assumed
-# until both are measured on the hull geometry.
+# E1, E2 measured on the hull IGES waterline at T: atan(0.495 B / L) over the
+# entrance (FP back to where the half-breadth reaches 0.495 B, 73.36 m) and the
+# run (aft end of the waterline forward to the same width, 33.46 m).
 KCS_SEAKEEPING = Seakeeping(
     L=KCS_L_PP,
     B=32.2,
@@ -97,8 +99,8 @@ KCS_SEAKEEPING = Seakeeping(
     T_A=10.8,
     C_B=0.6505,
     k_yy=0.25,
-    E1=math.radians(15.5),
-    E2=math.radians(25.0),
+    E1=math.radians(12.26),
+    E2=math.radians(25.47),
 )
 
 KCS_SHIP = Ship(
