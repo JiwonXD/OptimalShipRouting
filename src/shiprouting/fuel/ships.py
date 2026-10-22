@@ -1,7 +1,12 @@
 """Reference ships."""
 
+from shiprouting.fuel import model_test
+from shiprouting.fuel.engine import Engine
 from shiprouting.fuel.hull import Hull
 from shiprouting.fuel.model_test import ResistanceTest
+from shiprouting.fuel.powering import PropulsionFactors
+from shiprouting.fuel.propeller import OpenWaterCurve
+from shiprouting.fuel.ship import Ship
 
 # KRISO Container Ship (KCS), full scale.
 # Published (SIMMAN 2008, Tokyo 2015 CFD Workshop): L_WL 232.5 m, L_PP 230 m,
@@ -38,3 +43,41 @@ KCS_RESISTANCE_TEST = ResistanceTest(
     C_T=(3.796e-3, 3.641e-3, 3.475e-3, 3.467e-3, 3.711e-3, 4.501e-3),
 )
 KCS_L_PP = 230.0
+
+# KP505 propeller open-water test (model D 0.25 m), Tokyo 2015 openwater.txt.
+# Full scale: D 7.9 m, 5 blades, P/D(0.7R) 0.997, A_E/A_0 0.800.
+KCS_PROPELLER_D = 7.9
+KCS_OPEN_WATER = OpenWaterCurve(
+    J=(0.0, 0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.75, 0.8, 0.85, 0.9, 0.95, 1.0, 1.05),
+    K_T=(0.518, 0.482, 0.435, 0.387, 0.336, 0.285, 0.235, 0.185, 0.161, 0.137,
+         0.111, 0.083, 0.053, 0.022, -0.012),
+    K_Q=(0.0725, 0.0677, 0.0622, 0.0557, 0.0497, 0.0437, 0.0376, 0.0311, 0.0278,
+         0.0247, 0.0215, 0.0181, 0.0140, 0.0096, 0.0046),
+)
+
+# Propulsion factors at model scale (full-scale wake correction not applied).
+# w and η_R: thrust identity on the case 2.5 self-propulsion point (K_T 0.170,
+# K_Q 0.0288, n 9.5 rps, U 2.196 m/s) with the KP505 curve.
+# t: not in the published data; Holtrop (1984) regression gives 0.180.
+# η_S: assumed.
+KCS_PROPULSION = PropulsionFactors(t=0.180, w=0.209, eta_R=1.008, eta_S=0.99)
+
+# KCS was never built, so the engine is assumed: MAN G80ME-C10.5, Tier II,
+# high-load tuning (4,710 kW per cylinder, Marine Engine Programme 2021).
+# Sizing rule (assumed): calm-water power at 24 kn (≈28.6 MW) plus 15 % sea
+# margin at 90 % MCR needs ≈36.5 MW, so 8 cylinders = 37,680 kW.
+# SFOC at 50/75/100 % load, ISO conditions, LCV 42,700 kJ/kg.
+KCS_ENGINE = Engine(
+    mcr=8 * 4710e3,
+    sfoc_points=((0.50, 160.5), (0.75, 159.5), (1.00, 164.0)),
+)
+
+KCS_SHIP = Ship(
+    resistance=lambda speed: model_test.calm_water_resistance(
+        KCS_RESISTANCE_TEST, KCS_L_PP, speed
+    ),
+    factors=KCS_PROPULSION,
+    propeller=KCS_OPEN_WATER,
+    propeller_D=KCS_PROPELLER_D,
+    engine=KCS_ENGINE,
+)
