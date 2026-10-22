@@ -96,7 +96,7 @@ class SpeedChoice:
             if fuel2 >= fuel:
                 break
             k, clock, kg, fuel = k2, clock2, kg2, fuel2
-        return dataclasses.replace(r, clock=clock, cost=fuel)
+        return dataclasses.replace(r, clock=clock, cost=float(fuel))
 
 
 def meet_eta(graph: Graph, s: int, g: int, choice: SpeedChoice, eta_hours: float, tolerance: float = 0.002,
