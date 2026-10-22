@@ -7,11 +7,12 @@ name = "shiprouting"
 version = "0.0.1"
 description = "Weather-aware ship route and speed optimisation for minimum fuel"
 requires-python = ">=3.11"
-dependencies = ["numpy"]
+dependencies = ["numpy", "shapely"]
 
 [project.optional-dependencies]
 dev = ["pytest"]
 weather = ["eccodes", "ecmwf-opendata"]
+sea = ["pyogrio"]
 
 [tool.setuptools.packages.find]
 where = ["src"]
