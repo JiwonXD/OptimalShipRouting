@@ -81,7 +81,7 @@ def graph():
 def test_fuel_search_in_still_weather_follows_the_shortest_route(graph):
     s, g = graph.nearest(0.5, 150.5), graph.nearest(5.5, 160.5)
     c = cost(forecast())
-    r = astar(graph, s, g, c.edge_costs(graph, chunk=10_000), c.link_cost, c.heuristic(graph, g))
+    r = astar(graph, s, g, c.edge_costs(graph, chunk=10_000), c.link_cost, lambda n: 0.0)
     shortest = astar(graph, s, g)
     assert r.km == pytest.approx(shortest.km)
     assert r.cost == pytest.approx(c.calm_kg_per_km * r.km, rel=1e-4)
