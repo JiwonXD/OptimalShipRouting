@@ -36,3 +36,19 @@ def test_goes_around_land(grid):
 def test_start_on_land_is_rejected(grid):
     with pytest.raises(ValueError):
         astar(grid, (10.5, 10.5), (10.5, 25.5))
+
+
+def test_route_across_the_dateline(grid):
+    r = astar(grid, (-10.5, 175.5), (-10.5, -175.5))
+    assert len(r.lat) == 10  # straight across ±180°, not around the world
+    assert r.km == pytest.approx(9 * haversine_km(-10.5, 0.0, -10.5, 1.0))
+
+
+def test_land_check_across_the_dateline():
+    import numpy as np
+
+    from shiprouting.sea.latlon import segments_on_land
+
+    land = Land([shapely.box(-180.0, -1.0, -179.8, 1.0)])
+    assert segments_on_land(land, np.array([0.0, 0.0]), np.array([179.9, -179.9])) == 1
+    assert segments_on_land(land, np.array([5.0, 5.0]), np.array([179.9, -179.9])) == 0
