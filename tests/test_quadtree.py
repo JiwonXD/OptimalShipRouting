@@ -53,3 +53,37 @@ def test_pockets_of_water_cut_off_from_the_open_sea_are_dropped():
     in_lagoon = (g.lat > 0.3) & (g.lat < 0.7) & (g.lon > 0.3) & (g.lon < 0.7)
     assert not in_lagoon.any()
     assert g.size.min() == 1 / 8  # the coast outside the ring is still split
+
+
+def test_straightening_turns_a_staircase_into_a_straight_line(graph):
+    from shiprouting.sea.quadtree import straighten
+
+    start, goal = (-20.5, -60.5), (-12.5, -30.5)  # open water, not along a row, column or diagonal
+    r = astar(graph, graph.nearest(*start), graph.nearest(*goal))
+    t = straighten(WALL, r)
+    assert len(t.lat) == 2
+    assert t.km == pytest.approx(haversine_km(*start, *goal))
+    assert t.km < r.km
+
+
+def test_straightened_legs_go_round_land(graph):
+    from shiprouting.sea.latlon import segments_on_land
+    from shiprouting.sea.quadtree import straighten
+
+    r = astar(graph, graph.nearest(-35.5, -5.5), graph.nearest(25.5, 6.5))  # round the south end of the wall
+    t = straighten(WALL, r)
+    assert segments_on_land(WALL, t.lat, t.lon) == 0
+    assert 2 < len(t.lat) < len(r.lat)
+    assert t.km < r.km
+
+
+def test_straightening_keeps_links_and_crosses_the_dateline():
+    from shiprouting.sea.quadtree import straighten
+
+    canal = Link("운하", np.array([-20.0, -20.0]), np.array([-0.5, 2.5]))
+    g = Graph.build(WALL, root=1.0, min_step=1 / 16, lat_limits=(-40.0, 40.0), links=[canal])
+    t = straighten(WALL, astar(g, g.nearest(-25.5, -5.5), g.nearest(-15.5, 7.5)))
+    assert t.links == ["운하"] and t.on_link.sum() == 1
+    assert [-20.0, -0.5] in np.column_stack([t.lat, t.lon]).tolist()
+    t = straighten(WALL, astar(g, g.nearest(-10.5, 175.5), g.nearest(-5.5, -170.5)))
+    assert len(t.lat) == 2

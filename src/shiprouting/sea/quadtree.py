@@ -5,7 +5,9 @@ that is partly land is split into four, again and again down to `min_step`,
 so narrow straits, canal entrances and ports get small cells without making
 the whole ocean fine. Every cell is a node; cells whose boxes touch (along a
 side or at a corner) are joined by an edge when the straight line between
-their centres misses land. A* runs on that graph as on the regular grid.
+their centres misses land. A* runs on that graph as on the regular grid, and
+the path it finds is then straightened by cutting corners where the straight
+line misses land.
 """
 
 import heapq
@@ -180,6 +182,43 @@ def astar(graph: Graph, s: int, g: int) -> SearchResult:
     return SearchResult(np.array(lat), np.array(lon), np.array(on_link, bool), used, best[g], expanded, time.perf_counter() - t0)
 
 
+def straighten(land: Land, r: SearchResult) -> SearchResult:
+    """Cut the corners of a path: from each kept point, go straight to the farthest later point
+    the line to which misses land. Links are kept as they are."""
+    t0 = time.perf_counter()
+    lat, lon = r.lat, np.degrees(np.unwrap(np.radians(r.lon)))  # continuous across ±180°
+    fixed = np.zeros(len(lat), bool)
+    fixed[[0, -1]] = True
+    fixed[:-1] |= r.on_link
+    fixed[1:] |= r.on_link
+    keep, on_link = [0], []
+    i = 0
+    while i < len(lat) - 1:
+        if r.on_link[i]:
+            j = i + 1
+        else:
+            stop = i + 1 + int(np.argmax(fixed[i + 1 :]))
+            cand = np.arange(i + 1, stop + 1)
+            clear = ~lines_on_land(land, lat[i], lon[i], lat[cand], lon[cand])
+            j = int(cand[clear][-1]) if clear.any() else i + 1
+        on_link.append(bool(r.on_link[i]) and j == i + 1)
+        keep.append(j)
+        i = j
+    lat, lon = lat[keep], (lon[keep] + 180) % 360 - 180
+    km = float(haversine_km(lat[:-1], lon[:-1], lat[1:], lon[1:]).sum())
+    return SearchResult(lat, lon, np.array(on_link, bool), r.links, km, r.expanded, time.perf_counter() - t0)
+
+
+def lines_on_land(land: Land, lat0: float, lon0: float, lat, lon) -> np.ndarray:
+    """Whether each straight line from (lat0, lon0) to (lat[k], lon[k]) touches land; lon may run past ±180°."""
+    a = np.broadcast_to([lon0, lat0], (len(lat), 2))
+    b = np.column_stack([lon, lat])
+    hit = np.zeros(len(lat), bool)
+    for shift in (0.0, -360.0, 360.0):
+        hit |= land.crosses(shapely.linestrings(np.stack([a + [shift, 0], b + [shift, 0]], axis=1)))
+    return hit
+
+
 def run(land: Land, min_step: float, links=()) -> list[dict]:
     t0 = time.perf_counter()
     graph = Graph.build(land, min_step=min_step, links=links)
@@ -206,6 +245,7 @@ def run(land: Land, min_step: float, links=()) -> list[dict]:
             row["error"] = str(e)
         else:
             near = [n for n, (la, lo) in CHECKPOINTS.items() if haversine_km(r.lat, r.lon, la, lo).min() < 50]
+            t = straighten(land, r)
             row.update(
                 km=round(r.km),
                 expanded=r.expanded,
@@ -216,8 +256,14 @@ def run(land: Land, min_step: float, links=()) -> list[dict]:
                 moves_touching_land=segments_on_land(land, r.lat, r.lon, skip=r.on_link),
                 lat=np.round(r.lat, 4).tolist(),
                 lon=np.round(r.lon, 4).tolist(),
+                straight_km=round(t.km),
+                straight_seconds=round(t.seconds, 1),
+                straight_legs=len(t.lat) - 1,
+                straight_moves_touching_land=segments_on_land(land, t.lat, t.lon, skip=t.on_link),
+                straight_lat=np.round(t.lat, 4).tolist(),
+                straight_lon=np.round(t.lon, 4).tolist(),
             )
-        print({k: v for k, v in row.items() if k not in ("lat", "lon")}, flush=True)
+        print({k: v for k, v in row.items() if k not in ("lat", "lon", "straight_lat", "straight_lon")}, flush=True)
         rows.append(row)
     return rows
 
