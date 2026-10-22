@@ -10,9 +10,10 @@ Wave angles are where the waves come from relative to the bow: 0 = head seas,
 π = following seas, either side.
 """
 
-import bisect
 import math
 from dataclasses import dataclass
+
+import numpy as np
 
 from shiprouting.fuel.holtrop import G, RHO_SEA
 
@@ -189,31 +190,29 @@ class AddedResistanceTable:
     f is interpolated, bilinearly. T01 outside the table is clamped to its ends.
     """
 
-    T01: tuple[float, ...]  # s, ascending
-    angle: tuple[float, ...]  # rad, ascending from 0 to π
-    per_Hs2: tuple[tuple[float, ...], ...]  # N/m², [T01][angle]
+    T01: np.ndarray  # s, ascending
+    angle: np.ndarray  # rad, ascending from 0 to π
+    per_Hs2: np.ndarray  # N/m², (T01, angle)
 
     @classmethod
     def build(cls, sk: Seakeeping, speed: float, s: float = 1.0, T01=None, angle=None) -> "AddedResistanceTable":
-        T01 = tuple(T01 or (1.0 + 0.5 * i for i in range(39)))  # 1 to 20 s
-        angle = tuple(angle or (math.radians(5 * j) for j in range(37)))  # 0 to 180°
-        return cls(T01, angle, tuple(tuple(added_resistance(sk, 1.0, t, a, speed, s) for a in angle) for t in T01))
+        T01 = np.arange(1.0, 20.25, 0.5) if T01 is None else np.asarray(T01, float)
+        angle = np.radians(np.arange(0, 181, 5)) if angle is None else np.asarray(angle, float)
+        return cls(T01, angle, np.array([[added_resistance(sk, 1.0, t, a, speed, s) for a in angle] for t in T01]))
 
-    def __call__(self, Hs: float, T01: float, wave_angle: float) -> float:
-        """Added resistance, N, like ``added_resistance`` at the table's speed and spreading."""
-        if Hs <= 0:
-            return 0.0
-        t = min(max(T01, self.T01[0]), self.T01[-1])
-        a = abs(math.remainder(wave_angle, 2 * math.pi))
+    def __call__(self, Hs, T01, wave_angle):
+        """Added resistance, N, like ``added_resistance`` at the table's speed and spreading; works on arrays."""
+        Hs, T01, wave_angle = np.broadcast_arrays(*(np.asarray(v, float) for v in (Hs, T01, wave_angle)))
+        t = np.clip(T01, self.T01[0], self.T01[-1])
+        a = np.abs(np.remainder(wave_angle + np.pi, 2 * np.pi) - np.pi)
         i, wt = _cell(self.T01, t)
         j, wa = _cell(self.angle, a)
         f = self.per_Hs2
-        return Hs**2 * (
-            (1 - wt) * ((1 - wa) * f[i][j] + wa * f[i][j + 1]) + wt * ((1 - wa) * f[i + 1][j] + wa * f[i + 1][j + 1])
-        )
+        per_Hs2 = (1 - wt) * ((1 - wa) * f[i, j] + wa * f[i, j + 1]) + wt * ((1 - wa) * f[i + 1, j] + wa * f[i + 1, j + 1])
+        return np.where(Hs > 0, Hs**2 * per_Hs2, 0.0)
 
 
 def _cell(grid, x):
-    """Index of the grid interval holding ``x`` and the weight of its upper end."""
-    i = min(bisect.bisect_right(grid, x) - 1, len(grid) - 2)
+    """Index of the grid interval holding each ``x`` and the weight of its upper end."""
+    i = np.clip(np.searchsorted(grid, x, side="right") - 1, 0, len(grid) - 2)
     return i, (x - grid[i]) / (grid[i + 1] - grid[i])

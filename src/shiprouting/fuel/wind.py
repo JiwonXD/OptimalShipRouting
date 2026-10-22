@@ -6,8 +6,9 @@ This is the full air resistance, including the still-air part caused by the
 ship's own speed, because the calm-water resistance leaves air out.
 """
 
-import math
 from dataclasses import dataclass
+
+import numpy as np
 
 RHO_AIR = 1.225  # kg/m³, standard atmosphere at sea level
 
@@ -19,14 +20,9 @@ class Windage:
     C_DA: tuple[float, ...]  # wind resistance coefficient (= -C_X)
 
     def coefficient(self, angle: float) -> float:
-        """C_DA at relative wind ``angle`` (rad, either side of the bow)."""
-        a = math.degrees(abs(math.remainder(angle, 2 * math.pi)))
-        xs, ys = self.angles, self.C_DA
-        for i in range(len(xs) - 1):
-            if a <= xs[i + 1]:
-                w = (a - xs[i]) / (xs[i + 1] - xs[i])
-                return (1 - w) * ys[i] + w * ys[i + 1]
-        return ys[-1]
+        """C_DA at relative wind ``angle`` (rad, either side of the bow); works on arrays."""
+        a = np.degrees(np.abs(np.remainder(np.asarray(angle) + np.pi, 2 * np.pi) - np.pi))
+        return np.interp(a, self.angles, self.C_DA)
 
 
 def relative_wind(
@@ -38,9 +34,9 @@ def relative_wind(
     (0 = head wind) and ``ship_speed`` is the speed over ground.
     """
     # Air velocity relative to the ship, in ship axes (x forward, y to starboard).
-    ax = -wind_speed * math.cos(wind_angle) - ship_speed
-    ay = -wind_speed * math.sin(wind_angle)
-    return math.hypot(ax, ay), math.atan2(-ay, -ax)
+    ax = -wind_speed * np.cos(wind_angle) - ship_speed
+    ay = -wind_speed * np.sin(wind_angle)
+    return np.hypot(ax, ay), np.arctan2(-ay, -ax)
 
 
 def air_resistance(
