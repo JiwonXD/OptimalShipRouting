@@ -122,11 +122,22 @@ def join(land: Land, graph: Graph, lat: float, lon: float, tries: int = 100):
     return int(near[np.argmax(clear)]) if clear.any() else None
 
 
-def astar(graph: Graph, s: int, g: int) -> SearchResult:
+def astar(
+    graph: Graph, s: int, g: int, edge_cost=None, link_cost=None, heuristic=None, max_seconds: float = math.inf
+) -> SearchResult:
+    """Shortest path from node s to node g.
+
+    By default a move costs its length. `edge_cost` gives another cost per edge, aligned with
+    graph.indices, `link_cost(link, km)` another cost for taking a link, and `heuristic(n)` a
+    lower bound on the cost from n to g; the result's km is then the length of the path found,
+    and cost what was minimised.
+    """
     t0 = time.perf_counter()
 
     def h(n) -> float:
         return float(haversine_km(graph.lat[n], graph.lon[n], graph.lat[g], graph.lon[g]))
+
+    h = heuristic or h
 
     jumps = {}  # node -> [(node, km, link, reversed)]
     for a, b, link in graph.links:
@@ -135,8 +146,10 @@ def astar(graph: Graph, s: int, g: int) -> SearchResult:
             + link.km
             + float(haversine_km(graph.lat[b], graph.lon[b], link.lat[-1], link.lon[-1]))
         )
-        jumps.setdefault(a, []).append((b, km, link, False))
-        jumps.setdefault(b, []).append((a, km, link, True))
+        cost = km if link_cost is None else link_cost(link, km)
+        jumps.setdefault(a, []).append((b, cost, link, False))
+        jumps.setdefault(b, []).append((a, cost, link, True))
+    edge_cost = graph.km if edge_cost is None else edge_cost
 
     best = {s: 0.0}
     parent = {s: None}
@@ -151,10 +164,12 @@ def astar(graph: Graph, s: int, g: int) -> SearchResult:
         expanded += 1
         if c == g:
             break
+        if time.perf_counter() - t0 > max_seconds:
+            raise TimeoutError(f"stopped after {max_seconds:g} s ({expanded} cells expanded)")
         lo, hi = graph.indptr[c], graph.indptr[c + 1]
-        steps = [(int(n), float(km), None, False) for n, km in zip(graph.indices[lo:hi], graph.km[lo:hi])]
-        for n, km, link, rev in steps + jumps.get(c, []):
-            cost = best[c] + km
+        steps = [(int(n), float(w), None, False) for n, w in zip(graph.indices[lo:hi], edge_cost[lo:hi])]
+        for n, w, link, rev in steps + jumps.get(c, []):
+            cost = best[c] + w
             if n not in closed and cost < best.get(n, math.inf):
                 best[n] = cost
                 parent[n] = (c, link, rev)
@@ -179,7 +194,9 @@ def astar(graph: Graph, s: int, g: int) -> SearchResult:
         lat.append(graph.lat[n])
         lon.append(graph.lon[n])
         on_link.append(False)
-    return SearchResult(np.array(lat), np.array(lon), np.array(on_link, bool), used, best[g], expanded, time.perf_counter() - t0)
+    lat, lon = np.array(lat), np.array(lon)
+    km = best[g] if edge_cost is graph.km and link_cost is None else float(haversine_km(lat[:-1], lon[:-1], lat[1:], lon[1:]).sum())
+    return SearchResult(lat, lon, np.array(on_link, bool), used, km, expanded, time.perf_counter() - t0, best[g])
 
 
 def straighten(land: Land, r: SearchResult, clearance_km: float = 0.0) -> SearchResult:
