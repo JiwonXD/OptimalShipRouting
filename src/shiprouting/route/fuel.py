@@ -1,14 +1,18 @@
-"""First attempt at fuel-optimal routing: A* on the sea graph with fuel as the cost.
+"""Fuel-optimal routing: a shortest-path search on the sea graph with fuel as the cost.
 
 The ship sails at one fixed speed through the water. A move costs the fuel
-burnt over it, from the sea state at the move's midpoint in the forecast at the
-departure time: the weather is frozen for the whole voyage, and currents are
-left out. Links (canals, straits) are taken at the calm-water rate. The search
+burnt over it, from the sea state at the move's midpoint, and currents are left
+out. The weather is either frozen at the departure time for the whole voyage,
+or taken at the time the ship reaches the move's midpoint (moving weather),
+held at the forecast's last step beyond its end. Links (canals, straits) are taken at the calm-water rate. The search
 has no heuristic (Dijkstra): a following wind makes some moves cheaper than
 calm water, so calm-water fuel for the distance left is not a lower bound.
 
-With the weather frozen, every move's fuel is fixed before the search starts,
-so it is computed for all moves at once, on arrays. At a fixed speed the fuel
+In moving weather the search reaches a cell at the time of the cheapest path
+to it, and the cell's moves are costed at that time as it is expanded. With the
+weather frozen, every move's fuel is fixed before the search starts,
+so it is computed for all moves at once. Moves are costed one at a time by a
+Numba kernel (kernel.fuel_kg), which is quick on arrays of any size. At a fixed speed the fuel
 rate depends only on the total resistance, so it is read from a table of the
 ship model over resistance; wave added resistance comes from a table too.
 """
@@ -21,10 +25,10 @@ import numpy as np
 from shiprouting.fuel.powering import brake_power
 from shiprouting.fuel.ship import Ship
 from shiprouting.fuel.waves import AddedResistanceTable
-from shiprouting.fuel.wind import air_resistance
+from shiprouting.fuel.wind import RHO_AIR
+from shiprouting.route import kernel
 from shiprouting.sea.latlon import haversine_km
-from shiprouting.sea.quadtree import Graph, along
-from shiprouting.weather.conditions import T01_PER_TM10
+from shiprouting.sea.quadtree import Graph
 from shiprouting.weather.forecast import Forecast
 
 KNOT = 1852 / 3600  # m/s
@@ -43,23 +47,28 @@ class FuelCost:
     time: np.datetime64  # the weather used everywhere
     speed: float  # through the water, m/s
     waves: AddedResistanceTable | None = field(default=None, repr=False)  # built on first use if not given
+    frozen: bool = True  # weather at `time` everywhere; else at the time the ship gets there
     no_waves: int = 0  # moves with no wave data at the midpoint (taken without waves)
     over_mcr: int = 0  # moves that need more than the engine's MCR at this speed (fuel: inf)
+    beyond_forecast: int = 0  # moves reached after the forecast's end (weather of its last step)
     seconds: float = 0.0  # spent computing fuel
-    _rate: tuple | None = field(default=None, repr=False)  # (resistance N, fuel kg/h) up to MCR
+    _args: tuple | None = field(default=None, repr=False)  # for kernel.fuel_kg
 
     @property
     def calm_kg_per_km(self) -> float:
         return self.ship.fuel_rate(self.speed) / (self.speed * 3.6)
 
-    def fuel_rate(self, R):
-        """Fuel, kg/h, at our speed against total resistance R (N); NaN beyond the engine's MCR."""
-        if self._rate is None:
+    def _tables(self) -> tuple:
+        """Everything the kernel needs besides the moves, built on first use."""
+        if self._args is None:
             ship = self.ship
+            if self.waves is None:
+                self.waves = AddedResistanceTable.build(ship.seakeeping, self.speed)
 
             def power(r):
                 return brake_power(r, self.speed, ship.factors, ship.propeller, ship.propeller_D)
 
+            # Fuel rate over total resistance: at a fixed speed it depends on nothing else.
             lo, hi = 0.2 * ship.resistance(self.speed), ship.resistance(self.speed)
             while power(hi) < ship.engine.mcr:
                 hi *= 2
@@ -67,38 +76,40 @@ class FuelCost:
                 mid = 0.5 * (lo + hi)
                 lo, hi = (mid, hi) if power(mid) < ship.engine.mcr else (lo, mid)
             R_grid = np.linspace(0.2 * ship.resistance(self.speed), lo, 500)
-            self._rate = R_grid, np.array([ship.engine.fuel_rate(power(r)) for r in R_grid])
-        R_grid, kg_h = self._rate
-        return np.where(R <= R_grid[-1], np.interp(R, R_grid, kg_h), np.nan)
+            kg_h = np.array([ship.engine.fuel_rate(power(r)) for r in R_grid])
 
-    def kg(self, lat_a, lon_a, lat_b, lon_b):
-        """Fuel, kg, to sail each great circle from a to b; works on arrays.
+            windage, fc = ship.windage, self.forecast
+            seconds = fc.time.astype("datetime64[s]").astype(np.float64)
+            self._args = (
+                float(np.datetime64(self.time, "s").astype(np.float64)), self.frozen, self.speed,
+                float(ship.resistance(self.speed)),
+                np.array(windage.angles if windage else (0.0, 180.0), float),
+                np.array(windage.C_DA if windage else (0.0, 0.0), float),
+                float(windage.A_XV if windage else 0.0), RHO_AIR,
+                self.waves.T01, self.waves.angle, self.waves.per_Hs2,
+                R_grid, kg_h,
+                fc.lat, fc.lon, seconds,
+                *(fc.fields[n] for n in ("wind_u", "wind_v", "Hs", "wave_from_x", "wave_from_y", "T_m10")),
+            )  # fmt: skip
+        return self._args
 
-        The sea state is that of weather_at and sea_state, on arrays.
+    def kg(self, lat_a, lon_a, lat_b, lon_b, hours=0.0):
+        """Fuel, kg, to sail each great circle from a to b, setting out ``hours`` after `time`; works on arrays.
+
+        The sea state is that of weather_at and sea_state. Moves that need more than the
+        engine's MCR cost inf.
         """
+        args = self._tables()
         t0 = time.perf_counter()
-        if self.waves is None:
-            self.waves = AddedResistanceTable.build(self.ship.seakeeping, self.speed)
-        km = haversine_km(lat_a, lon_a, lat_b, lon_b)
-        lat, lon = along(lat_a, lon_a, lat_b, lon_b, 0.5)
-        heading = bearing(lat_a, lon_a, lat_b, lon_b)
-
-        def get(name):
-            return self.forecast.sample(name, lat, lon, self.time)
-
-        u, v = get("wind_u"), get("wind_v")
-        R = self.ship.resistance(self.speed) + air_resistance(
-            self.ship.windage, np.hypot(u, v), np.arctan2(-u, -v) - heading, self.speed
-        )
-        Hs = get("Hs")
-        no_waves = np.isnan(Hs)
-        wave_from = np.arctan2(get("wave_from_x"), get("wave_from_y"))
-        R = R + self.waves(np.where(no_waves, 0.0, Hs), T01_PER_TM10 * get("T_m10"), wave_from - heading)
-        rate = self.fuel_rate(R)
-        self.no_waves += int(no_waves.sum())
-        self.over_mcr += int(np.isnan(rate).sum())
+        moves = np.broadcast_arrays(*(np.asarray(v, np.float64) for v in (lat_a, lon_a, lat_b, lon_b, hours)))
+        shape = moves[0].shape
+        out, counts = np.empty(moves[0].size), np.zeros(3, np.int64)
+        kernel.fuel_kg(*(np.ascontiguousarray(v).ravel() for v in moves), out, counts, *args)
+        self.no_waves += int(counts[0])
+        self.over_mcr += int(counts[1])
+        self.beyond_forecast += int(counts[2])
         self.seconds += time.perf_counter() - t0
-        return np.where(np.isnan(rate), np.inf, rate * km / (self.speed * 3.6))
+        return out.reshape(shape)
 
     def edge_costs(self, graph: Graph, chunk: int = 1_000_000) -> np.ndarray:
         """Fuel, kg, of every move of the graph, aligned with graph.indices, for quadtree.astar."""
@@ -109,62 +120,72 @@ class FuelCost:
             out[k : k + chunk] = self.kg(graph.lat[a], graph.lon[a], graph.lat[b], graph.lon[b])
         return out
 
+    def moving_costs(self, graph: Graph):
+        """edge_cost function for quadtree.astar: the fuel of node c's moves, setting out km into the voyage."""
+
+        def costs(c, km):
+            lo, hi = graph.indptr[c], graph.indptr[c + 1]
+            n = graph.indices[lo:hi]
+            return self.kg(graph.lat[c], graph.lon[c], graph.lat[n], graph.lon[n], km / (self.speed * 3.6))
+
+        return costs
+
     def link_cost(self, link, km: float) -> float:
         return km * self.calm_kg_per_km
 
     def path(self, lat, lon, on_link) -> float:
         """Fuel, kg, along a path, links at the calm-water rate."""
-        sea = ~on_link
-        a, b = np.nonzero(sea)[0], np.nonzero(sea)[0] + 1
-        link_km = haversine_km(lat[:-1], lon[:-1], lat[1:], lon[1:])[on_link].sum()
-        return float(self.kg(lat[a], lon[a], lat[b], lon[b]).sum() + link_km * self.calm_kg_per_km)
+        seg_km = haversine_km(lat[:-1], lon[:-1], lat[1:], lon[1:])
+        hours = (np.cumsum(seg_km) - seg_km) / (self.speed * 3.6)  # setting out on each segment
+        a = np.nonzero(~on_link)[0]
+        kg = self.kg(lat[a], lon[a], lat[a + 1], lon[a + 1], hours[a])
+        return float(kg.sum() + seg_km[on_link].sum() * self.calm_kg_per_km)
 
 
 def run(graph: Graph, ship: Ship, forecast: Forecast, speed_kn: float, max_seconds: float) -> list[dict]:
+    """The shortest route, the fuel-optimal route in frozen weather and the one in moving weather,
+    each costed in both kinds of weather."""
     from shiprouting.sea.latlon import ROUTES
     from shiprouting.sea.quadtree import astar
 
     departure = forecast.time[0]
     t0 = time.perf_counter()
-    cost = FuelCost(ship, forecast, departure, speed_kn * KNOT, AddedResistanceTable.build(ship.seakeeping, speed_kn * KNOT))
+    waves = AddedResistanceTable.build(ship.seakeeping, speed_kn * KNOT)
     print(f"wave added resistance table built in {time.perf_counter() - t0:.0f} s", flush=True)
-    edge_kg = cost.edge_costs(graph)
+    frozen = FuelCost(ship, forecast, departure, speed_kn * KNOT, waves)
+    moving = FuelCost(ship, forecast, departure, speed_kn * KNOT, waves, frozen=False)
+    edge_kg = frozen.edge_costs(graph)
     print(
-        f"fuel of {len(edge_kg)} moves computed in {cost.seconds:.0f} s"
-        f" (no wave data: {cost.no_waves}, beyond MCR: {cost.over_mcr})",
+        f"fuel of {len(edge_kg)} moves computed in {frozen.seconds:.0f} s"
+        f" (no wave data: {frozen.no_waves}, beyond MCR: {frozen.over_mcr})",
         flush=True,
     )
+    forecast_hours = float((forecast.time[-1] - departure) / np.timedelta64(1, "h"))
     rows = []
     for name, (start, goal) in ROUTES.items():
         s, g = graph.nearest(*start), graph.nearest(*goal)
-        row = {"route": name, "speed_kn": speed_kn, "weather_time": str(departure)}
-        shortest = astar(graph, s, g)
-        before = cost.no_waves
-        row.update(
-            shortest_km=round(shortest.km),
-            shortest_fuel_t=round(cost.path(shortest.lat, shortest.lon, shortest.on_link) / 1000, 2),
-            shortest_no_waves=f"{cost.no_waves - before}/{int((~shortest.on_link).sum())}",
-            shortest_calm_fuel_t=round(shortest.km * cost.calm_kg_per_km / 1000, 2),
-            shortest_seconds=round(shortest.seconds, 1),
-        )
+        row = {"route": name, "speed_kn": speed_kn, "departure": str(departure), "forecast_hours": forecast_hours}
+        found = {"shortest": astar(graph, s, g), "frozen": astar(graph, s, g, edge_kg, frozen.link_cost, lambda n: 0.0)}
         try:
-            r = astar(graph, s, g, edge_kg, cost.link_cost, lambda n: 0.0, max_seconds)
-        except (ValueError, TimeoutError) as e:
-            row["error"] = str(e)
-        else:
-            row.update(
-                fuel_km=round(r.km),
-                fuel_t=round(r.cost / 1000, 2),
-                expanded=r.expanded,
-                seconds=round(r.seconds, 1),
-                links=r.links,
-                lat=np.round(r.lat, 4).tolist(),
-                lon=np.round(r.lon, 4).tolist(),
-            )
-            before = cost.no_waves
-            cost.path(r.lat, r.lon, r.on_link)
-            row["fuel_no_waves"] = f"{cost.no_waves - before}/{int((~r.on_link).sum())}"
-        print({k: v for k, v in row.items() if k not in ("lat", "lon")}, flush=True)
+            found["moving"] = astar(graph, s, g, moving.moving_costs(graph), moving.link_cost, lambda n: 0.0, max_seconds)
+        except TimeoutError as e:
+            row["moving_error"] = str(e)
+        for key, r in found.items():
+            before = moving.beyond_forecast
+            fuel_moving = moving.path(r.lat, r.lon, r.on_link)
+            row[key] = {
+                "km": round(r.km),
+                "hours": round(r.km / (speed_kn * 1.852)),
+                "fuel_frozen_t": round(frozen.path(r.lat, r.lon, r.on_link) / 1000, 2),
+                "fuel_moving_t": round(fuel_moving / 1000, 2),
+                "moves_after_forecast": f"{moving.beyond_forecast - before}/{int((~r.on_link).sum())}",
+                "expanded": r.expanded,
+                "seconds": round(r.seconds, 1),
+                "links": r.links,
+            }
+        print(row, flush=True)
+        for key, r in found.items():
+            row[key] |= {"lat": np.round(r.lat, 4).tolist(), "lon": np.round(r.lon, 4).tolist()}
         rows.append(row)
     return rows
 
@@ -178,14 +199,14 @@ def main() -> None:
     from shiprouting.sea.land import load_osm_land_polygons
     from shiprouting.weather import ecmwf
 
-    parser = argparse.ArgumentParser(description="Fuel-optimal routes for the test voyages, weather frozen at departure.")
+    parser = argparse.ArgumentParser(description="Fuel-optimal routes for the test voyages, in frozen and in moving weather.")
     parser.add_argument("land", help="land polygons shapefile")
     parser.add_argument("forecast", help="glob of the ECMWF GRIB2 files")
     parser.add_argument("out", help="results .json")
     parser.add_argument("--min-step", type=float, default=1 / 64)
     parser.add_argument("--links", help="folder with the Overpass canal and strait files (see links.LINKS)")
     parser.add_argument("--speed-kn", type=float, default=16.0)
-    parser.add_argument("--max-seconds", type=float, default=600.0, help="give up a fuel search after this long")
+    parser.add_argument("--max-seconds", type=float, default=600.0, help="give up a moving-weather search after this long")
     args = parser.parse_args()
 
     land = load_osm_land_polygons(args.land)
