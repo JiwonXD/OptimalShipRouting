@@ -1,6 +1,7 @@
 """Reference ships."""
 
 from shiprouting.fuel.hull import Hull
+from shiprouting.fuel.model_test import ResistanceTest
 
 # KRISO Container Ship (KCS), full scale.
 # Published (SIMMAN 2008, Tokyo 2015 CFD Workshop): L_WL 232.5 m, L_PP 230 m,
@@ -25,3 +26,15 @@ KCS = Hull(
     k2=1.5,
     C_stern=0.0,
 )
+
+# KCS Model 1 resistance test, Tokyo 2015 CFD Workshop case 2.1
+# (L_PP 7.2786 m, with rudder, free sinkage and trim, S0/L_PP² = 0.1803,
+# ν = 1.27e-6 m²/s). Measurement uncertainty of C_T is 1.0 %.
+KCS_RESISTANCE_TEST = ResistanceTest(
+    L=7.2786,
+    wetted_surface_ratio=0.1803,
+    nu=1.27e-6,
+    froude=(0.108, 0.152, 0.195, 0.227, 0.260, 0.282),
+    C_T=(3.796e-3, 3.641e-3, 3.475e-3, 3.467e-3, 3.711e-3, 4.501e-3),
+)
+KCS_L_PP = 230.0
