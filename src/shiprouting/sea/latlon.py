@@ -5,7 +5,7 @@ A cell is water when its centre is not on land. The ship moves to any of the
 centres does not touch land; the cost of a move is the great-circle distance
 between the cell centres, and A* uses the great-circle distance to the goal
 as its heuristic. Canals too narrow for any cell are added as links that join
-the water cells nearest their two ends.
+at each end the nearest water cell with a clear straight hop to it.
 """
 
 import heapq
@@ -50,8 +50,12 @@ class LatLonGrid:
         # A water cell with no open move cannot be reached or left; a port snapped onto one has no route.
         water &= moves.any(axis=2)
         grid = cls(step, water, moves)
-        ends = [(nearest_water(grid, k.lat[0], k.lon[0]), nearest_water(grid, k.lat[-1], k.lon[-1])) for k in links]
-        return cls(step, water, moves, tuple((grid.cell(*a), grid.cell(*b), k) for (a, b), k in zip(ends, links)))
+        joined = []
+        for k in links:
+            a, b = join(land, grid, k.lat[0], k.lon[0]), join(land, grid, k.lat[-1], k.lon[-1])
+            if a is not None and b is not None:
+                joined.append((grid.cell(*a), grid.cell(*b), k))
+        return cls(step, water, moves, tuple(joined))
 
     def center(self, i: int, j: int) -> tuple[float, float]:
         return -90 + self.step * (i + 0.5), -180 + self.step * (j + 0.5)
@@ -204,6 +208,22 @@ def nearest_water(grid: LatLonGrid, lat: float, lon: float) -> tuple[float, floa
     return float(c_lat[k]), float(c_lon[k])
 
 
+def join(land: Land, grid: LatLonGrid, lat: float, lon: float, tries: int = 100):
+    """Centre of the nearest water cell whose straight hop to (lat, lon) misses land, or None."""
+    import shapely
+
+    i, j = np.nonzero(grid.water)
+    c_lat, c_lon = -90 + grid.step * (i + 0.5), -180 + grid.step * (j + 0.5)
+    near = np.argsort(haversine_km(c_lat, c_lon, lat, lon))[:tries]
+    a = np.column_stack([c_lon[near], c_lat[near]])
+    b = np.broadcast_to([lon, lat], a.shape)
+    clear = ~land.crosses(shapely.linestrings(np.stack([a, b], axis=1)))
+    if not clear.any():
+        return None
+    k = near[np.argmax(clear)]
+    return float(c_lat[k]), float(c_lon[k])
+
+
 def segments_on_land(land: Land, lat, lon, skip=None) -> int:
     """Moves whose straight line between points touches land, leaving out the segments marked in `skip`."""
     import shapely
@@ -224,6 +244,8 @@ def run(land: Land, step: float, links=()) -> list[dict]:
     grid = LatLonGrid.build(land, step, links=links)
     build_s = time.perf_counter() - t0
     print(f"grid {step}°: {grid.water.shape[0]}x{grid.water.shape[1]}, {int(grid.water.sum())} water cells, built in {build_s:.0f} s")
+    for name in {k.name for k in links} - {k.name for _, _, k in grid.links}:
+        print(f"link {name}: no water cell nearby with a clear hop to an end; left out")
     for a, b, link in grid.links:
         ends = (grid.center(*a), grid.center(*b))
         connect = [float(haversine_km(*e, la, lo)) for e, la, lo in zip(ends, link.lat[[0, -1]], link.lon[[0, -1]])]
