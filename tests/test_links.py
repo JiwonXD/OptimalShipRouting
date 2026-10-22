@@ -39,3 +39,12 @@ def test_route_takes_a_link_through_a_wall_of_land():
     assert r.on_link.sum() == 2  # the two segments of the canal itself
     assert segments_on_land(land, r.lat, r.lon) == 2  # both canal segments cross the wall ...
     assert segments_on_land(land, r.lat, r.lon, skip=r.on_link) == 0  # ... and nothing else does
+
+
+def test_link_ends_join_a_cell_across_open_water_not_over_a_cape():
+    # The cell nearest the canal end lies behind a cape; the next nearest is in open water.
+    cape = shapely.box(10.2, 10.6, 10.4, 11.4)
+    canal = Link("운하", np.array([11.1, 11.1, 20.5]), np.array([10.1, 10.0, 10.0]))
+    grid = LatLonGrid.build(Land([cape]), 1.0, lat_limits=(-90.0, 90.0), links=[canal])
+    a, _, _ = grid.links[0]
+    assert grid.center(*a) == (11.5, 9.5)
