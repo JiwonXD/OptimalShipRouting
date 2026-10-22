@@ -67,12 +67,11 @@ def test_straightening_turns_a_staircase_into_a_straight_line(graph):
 
 
 def test_straightened_legs_go_round_land(graph):
-    from shiprouting.sea.latlon import segments_on_land
-    from shiprouting.sea.quadtree import straighten
+    from shiprouting.sea.quadtree import arcs_on_land, straighten
 
     r = astar(graph, graph.nearest(-35.5, -5.5), graph.nearest(25.5, 6.5))  # round the south end of the wall
     t = straighten(WALL, r)
-    assert segments_on_land(WALL, t.lat, t.lon) == 0
+    assert not arcs_on_land(WALL, t.lat[:-1], t.lon[:-1], t.lat[1:], t.lon[1:]).any()
     assert 2 < len(t.lat) < len(r.lat)
     assert t.km < r.km
 
@@ -87,3 +86,26 @@ def test_straightening_keeps_links_and_crosses_the_dateline():
     assert [-20.0, -0.5] in np.column_stack([t.lat, t.lon]).tolist()
     t = straighten(WALL, astar(g, g.nearest(-10.5, 175.5), g.nearest(-5.5, -170.5)))
     assert len(t.lat) == 2
+
+
+def test_arcs_are_checked_along_the_great_circle_not_the_lon_lat_line():
+    from shiprouting.sea.latlon import segments_on_land
+    from shiprouting.sea.quadtree import arcs_on_land, along
+
+    # The great circle between two points on 45.5°N, 60° of longitude apart, bulges north
+    # halfway to tan(lat) = tan(45.5°) / cos(30°), about 49.6°N.
+    mid_lat, mid_lon = along(45.5, -60.5, 45.5, -0.5, 0.5)
+    assert mid_lat == pytest.approx(np.degrees(np.arctan(np.tan(np.radians(45.5)) / np.cos(np.radians(30)))))
+    assert mid_lon == pytest.approx(-30.5)
+    island = Land([shapely.box(-31.0, 48.5, -30.0, 50.5)])
+    assert segments_on_land(island, np.array([45.5, 45.5]), np.array([-60.5, -0.5])) == 0
+    assert arcs_on_land(island, 45.5, -60.5, 45.5, -0.5).all()
+    assert not arcs_on_land(island, 45.5, -60.5, 45.5, -35.5).any()
+
+
+def test_arcs_across_the_dateline_see_land_on_both_sides():
+    from shiprouting.sea.quadtree import arcs_on_land
+
+    land = Land([shapely.box(-180.0, -1.0, -179.9, 1.0), shapely.box(179.0, 10.0, 180.0, 11.0)])
+    assert arcs_on_land(land, [0.0, 10.5], [179.5, 178.5], [0.0, 10.5], [-179.5, -178.5]).tolist() == [True, True]
+    assert not arcs_on_land(land, 5.0, 179.5, 5.0, -179.5).any()

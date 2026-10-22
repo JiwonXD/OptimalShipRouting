@@ -184,7 +184,7 @@ def astar(graph: Graph, s: int, g: int) -> SearchResult:
 
 def straighten(land: Land, r: SearchResult) -> SearchResult:
     """Cut the corners of a path: from each kept point, go straight to the farthest later point
-    the line to which misses land. Links are kept as they are."""
+    the great-circle arc to which misses land. Links are kept as they are."""
     t0 = time.perf_counter()
     lat, lon = r.lat, np.degrees(np.unwrap(np.radians(r.lon)))  # continuous across ±180°
     fixed = np.zeros(len(lat), bool)
@@ -199,7 +199,7 @@ def straighten(land: Land, r: SearchResult) -> SearchResult:
         else:
             stop = i + 1 + int(np.argmax(fixed[i + 1 :]))
             cand = np.arange(i + 1, stop + 1)
-            clear = ~lines_on_land(land, lat[i], lon[i], lat[cand], lon[cand])
+            clear = ~arcs_on_land(land, lat[i], lon[i], lat[cand], lon[cand])
             j = int(cand[clear][-1]) if clear.any() else i + 1
         on_link.append(bool(r.on_link[i]) and j == i + 1)
         keep.append(j)
@@ -209,14 +209,38 @@ def straighten(land: Land, r: SearchResult) -> SearchResult:
     return SearchResult(lat, lon, np.array(on_link, bool), r.links, km, r.expanded, time.perf_counter() - t0)
 
 
-def lines_on_land(land: Land, lat0: float, lon0: float, lat, lon) -> np.ndarray:
-    """Whether each straight line from (lat0, lon0) to (lat[k], lon[k]) touches land; lon may run past ±180°."""
-    a = np.broadcast_to([lon0, lat0], (len(lat), 2))
-    b = np.column_stack([lon, lat])
-    hit = np.zeros(len(lat), bool)
-    for shift in (0.0, -360.0, 360.0):
-        hit |= land.crosses(shapely.linestrings(np.stack([a + [shift, 0], b + [shift, 0]], axis=1)))
-    return hit
+def arcs_on_land(land: Land, lat0, lon0, lat1, lon1, piece_km: float = 20.0) -> np.ndarray:
+    """Whether each great-circle arc from (lat0, lon0) to (lat1, lon1) touches land.
+
+    An arc is cut into pieces of at most piece_km, each tested as a straight lon/lat line;
+    over 20 km the two differ by metres.
+    """
+    lat0, lon0, lat1, lon1 = np.broadcast_arrays(*(np.atleast_1d(np.asarray(v, float)) for v in (lat0, lon0, lat1, lon1)))
+    n = np.maximum(1, np.ceil(haversine_km(lat0, lon0, lat1, lon1) / piece_km)).astype(int)
+    arc = np.repeat(np.arange(len(n)), n)
+    k = np.arange(len(arc)) - np.repeat(np.cumsum(n) - n, n)
+    a_lat, a_lon = along(lat0[arc], lon0[arc], lat1[arc], lon1[arc], k / n[arc])
+    b_lat, b_lon = along(lat0[arc], lon0[arc], lat1[arc], lon1[arc], (k + 1) / n[arc])
+    b_lon = a_lon + (b_lon - a_lon + 180) % 360 - 180  # a piece crossing ±180° runs past it
+    a, b = np.column_stack([a_lon, a_lat]), np.column_stack([b_lon, b_lat])
+    hit = land.crosses(shapely.linestrings(np.stack([a, b], axis=1)))
+    for shift, past in ((360.0, b_lon < -180), (-360.0, b_lon > 180)):
+        if past.any():
+            hit[past] |= land.crosses(shapely.linestrings(np.stack([a[past] + [shift, 0], b[past] + [shift, 0]], axis=1)))
+    return np.bincount(arc, weights=hit, minlength=len(n)) > 0
+
+
+def along(lat0, lon0, lat1, lon1, f):
+    """The point a fraction f of the way along the great circle from (lat0, lon0) to (lat1, lon1)."""
+    p0, l0, p1, l1 = (np.radians(v) for v in (lat0, lon0, lat1, lon1))
+    u0 = np.stack([np.cos(p0) * np.cos(l0), np.cos(p0) * np.sin(l0), np.sin(p0)])
+    u1 = np.stack([np.cos(p1) * np.cos(l1), np.cos(p1) * np.sin(l1), np.sin(p1)])
+    omega = np.arccos(np.clip((u0 * u1).sum(axis=0), -1.0, 1.0))
+    sin_omega = np.where(omega > 1e-12, np.sin(omega), 1.0)
+    w0 = np.where(omega > 1e-12, np.sin((1 - f) * omega) / sin_omega, 1 - f)
+    w1 = np.where(omega > 1e-12, np.sin(f * omega) / sin_omega, f)
+    u = w0 * u0 + w1 * u1
+    return np.degrees(np.arctan2(u[2], np.hypot(u[0], u[1]))), np.degrees(np.arctan2(u[1], u[0]))
 
 
 def run(land: Land, min_step: float, links=()) -> list[dict]:
@@ -259,7 +283,7 @@ def run(land: Land, min_step: float, links=()) -> list[dict]:
                 straight_km=round(t.km),
                 straight_seconds=round(t.seconds, 1),
                 straight_legs=len(t.lat) - 1,
-                straight_moves_touching_land=segments_on_land(land, t.lat, t.lon, skip=t.on_link),
+                straight_legs_touching_land=int((arcs_on_land(land, t.lat[:-1], t.lon[:-1], t.lat[1:], t.lon[1:]) & ~t.on_link).sum()),
                 straight_lat=np.round(t.lat, 4).tolist(),
                 straight_lon=np.round(t.lon, 4).tolist(),
             )
