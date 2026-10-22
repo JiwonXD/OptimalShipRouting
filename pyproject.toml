@@ -12,7 +12,7 @@ dependencies = ["numpy", "shapely"]
 [project.optional-dependencies]
 dev = ["pytest"]
 weather = ["eccodes", "ecmwf-opendata"]
-sea = ["pyogrio"]
+sea = ["pyogrio", "scipy"]
 
 [tool.setuptools.packages.find]
 where = ["src"]
