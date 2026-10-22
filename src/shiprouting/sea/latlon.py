@@ -100,6 +100,7 @@ class SearchResult:
     km: float
     expanded: int  # cells taken off the open list
     seconds: float
+    cost: float = math.nan  # what the search minimised, when that is not the distance
 
 
 def astar(grid: LatLonGrid, start: tuple[float, float], goal: tuple[float, float]) -> SearchResult:

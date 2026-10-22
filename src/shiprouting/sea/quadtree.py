@@ -122,11 +122,20 @@ def join(land: Land, graph: Graph, lat: float, lon: float, tries: int = 100):
     return int(near[np.argmax(clear)]) if clear.any() else None
 
 
-def astar(graph: Graph, s: int, g: int) -> SearchResult:
+def astar(graph: Graph, s: int, g: int, weight=None, heuristic=None, max_seconds: float = math.inf) -> SearchResult:
+    """Shortest path from node s to node g.
+
+    By default a move costs its length. `weight(c, n, km, link)` gives another cost for the
+    move from c to n (link: the Link taken, or None), and `heuristic(n)` a lower bound on the
+    cost from n to g; the result's km is then the length of the path found, and cost what
+    was minimised.
+    """
     t0 = time.perf_counter()
 
     def h(n) -> float:
         return float(haversine_km(graph.lat[n], graph.lon[n], graph.lat[g], graph.lon[g]))
+
+    h = heuristic or h
 
     jumps = {}  # node -> [(node, km, link, reversed)]
     for a, b, link in graph.links:
@@ -151,10 +160,12 @@ def astar(graph: Graph, s: int, g: int) -> SearchResult:
         expanded += 1
         if c == g:
             break
+        if time.perf_counter() - t0 > max_seconds:
+            raise TimeoutError(f"stopped after {max_seconds:g} s ({expanded} cells expanded)")
         lo, hi = graph.indptr[c], graph.indptr[c + 1]
         steps = [(int(n), float(km), None, False) for n, km in zip(graph.indices[lo:hi], graph.km[lo:hi])]
         for n, km, link, rev in steps + jumps.get(c, []):
-            cost = best[c] + km
+            cost = best[c] + (km if weight is None else weight(c, n, km, link))
             if n not in closed and cost < best.get(n, math.inf):
                 best[n] = cost
                 parent[n] = (c, link, rev)
@@ -179,7 +190,9 @@ def astar(graph: Graph, s: int, g: int) -> SearchResult:
         lat.append(graph.lat[n])
         lon.append(graph.lon[n])
         on_link.append(False)
-    return SearchResult(np.array(lat), np.array(lon), np.array(on_link, bool), used, best[g], expanded, time.perf_counter() - t0)
+    lat, lon = np.array(lat), np.array(lon)
+    km = best[g] if weight is None else float(haversine_km(lat[:-1], lon[:-1], lat[1:], lon[1:]).sum())
+    return SearchResult(lat, lon, np.array(on_link, bool), used, km, expanded, time.perf_counter() - t0, best[g])
 
 
 def straighten(land: Land, r: SearchResult, clearance_km: float = 0.0) -> SearchResult:
