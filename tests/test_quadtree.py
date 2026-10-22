@@ -44,6 +44,9 @@ def test_links_join_cells_near_their_ends(graph):
     g = Graph.build(WALL, root=1.0, min_step=1 / 16, lat_limits=(-40.0, 40.0), links=[canal])
     r = astar(g, g.nearest(-20.5, -5.5), g.nearest(-20.5, 7.5))
     assert r.links == ["운하"]
+    # The clock (km by default) runs along the path, through the canal's own points too.
+    assert np.all(np.diff(r.clock) > 0)
+    assert r.clock[-1] == pytest.approx(r.km)
 
 
 def test_pockets_of_water_cut_off_from_the_open_sea_are_dropped():
