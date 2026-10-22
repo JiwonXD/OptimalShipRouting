@@ -2,7 +2,7 @@
 
 import numpy as np
 from scipy.sparse import coo_matrix
-from scipy.sparse.csgraph import dijkstra
+from scipy.sparse.csgraph import connected_components, dijkstra
 from scipy.spatial import cKDTree
 
 from shiprouting.sea.canals import Canal
@@ -20,6 +20,7 @@ class Router:
     def __init__(self, graph: SeaGraph, land: Land, canals: tuple[Canal, ...] = ()):
         self.graph = graph
         self.land = land
+        self.nodes = np.arange(len(graph.cells))
         self.tree = cKDTree(_unit(graph.lat, graph.lon))
         # A canal is one edge between the sea nodes nearest its two ends.
         self.canals = {}
@@ -38,9 +39,13 @@ class Router:
         self.matrix = coo_matrix(
             (np.concatenate([km, km]), (np.concatenate([i, j]), np.concatenate([j, i]))), shape=(n, n)
         ).tocsr()
+        # Snap points only to the largest connected sea, not to lakes and enclosed inlets.
+        _, labels = connected_components(self.matrix, directed=False)
+        self.nodes = np.flatnonzero(labels == np.bincount(labels).argmax())
+        self.tree = cKDTree(_unit(graph.lat[self.nodes], graph.lon[self.nodes]))
 
     def nearest_node(self, lat: float, lon: float) -> int:
-        return int(self.tree.query(_unit([lat], [lon])[0])[1])
+        return int(self.nodes[self.tree.query(_unit([lat], [lon])[0])[1]])
 
     def shortest_nodes(self, start: int, end: int) -> list[int]:
         """Node indices of the shortest path (Dijkstra, exact on the graph)."""

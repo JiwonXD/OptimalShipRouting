@@ -118,3 +118,24 @@ def test_canal_through_land(tmp_path, graph):
     lat, lon = Router(graph, LAND, canals=(canal,)).route(start, end)
     assert length_km(lat, lon) < length_km(*without)
     assert 5.0 in lon.tolist() and 15.0 in lon.tolist()  # follows the centreline through the land
+
+
+def test_strait_refinement_opens_a_channel_narrower_than_the_cells():
+    # 0.1° (≈11 km) channel: closed with res-4 coast cells, open when refined to res 6 there.
+    land = Land([shapely.box(40.0, 0.05, 60.0, 30.0), shapely.box(40.0, -30.0, 60.0, -0.05)])
+    start, end = (0.0, 35.0), (0.0, 65.0)
+    direct = haversine_km(*start, *end)
+    closed = Router(grid.build(land, ocean_res=2, max_res=4, refine=()), land).route(start, end)
+    assert length_km(*closed) > 1.5 * direct
+    channel = ((39.0, -1.0, 61.0, 1.0), 6)
+    opened = Router(grid.build(land, ocean_res=2, max_res=4, refine=(channel,)), land).route(start, end)
+    assert length_km(*opened) < 1.05 * direct
+
+
+def test_points_snap_to_the_main_sea_not_a_lake():
+    # A ring of land enclosing a lake at 0°N 100°E.
+    ring = shapely.box(95.0, -5.0, 105.0, 5.0).difference(shapely.box(97.0, -3.0, 103.0, 3.0))
+    land = Land([ring])
+    router = Router(grid.build(land, ocean_res=2, max_res=4, refine=()), land)
+    node = router.nearest_node(0.0, 100.0)
+    assert not (95.0 < router.graph.lon[node] < 105.0 and -5.0 < router.graph.lat[node] < 5.0)

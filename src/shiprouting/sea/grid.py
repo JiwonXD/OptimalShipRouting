@@ -22,6 +22,13 @@ from shiprouting.sea.land import Land, load_osm_land_polygons
 
 log = logging.getLogger(__name__)
 
+# Straits narrower than a cell at the default max_res, refined further:
+# (lon_min, lat_min, lon_max, lat_max) of the cell centres, resolution.
+STRAITS = {
+    "Bosporus": ((28.95, 40.98, 29.20, 41.25), 9),
+    "Dardanelles": ((26.15, 39.95, 26.75, 40.50), 9),
+}
+
 
 @dataclass(frozen=True)
 class SeaGraph:
@@ -41,8 +48,10 @@ class SeaGraph:
             return cls(**{k: f[k] for k in f.files})
 
 
-def build(land: Land, ocean_res: int = 4, max_res: int = 7, max_lat: float = 85.0) -> SeaGraph:
-    cells = sea_cells(land, ocean_res, max_res, max_lat)
+def build(
+    land: Land, ocean_res: int = 4, max_res: int = 7, max_lat: float = 85.0, refine=tuple(STRAITS.values())
+) -> SeaGraph:
+    cells = sea_cells(land, ocean_res, max_res, max_lat, refine)
     lat, lon = np.array([h3.cell_to_latlng(int(c)) for c in cells]).T
     log.info("%d nodes", len(cells))
     i, j = neighbour_pairs(cells, ocean_res)
@@ -56,12 +65,14 @@ def build(land: Land, ocean_res: int = 4, max_res: int = 7, max_lat: float = 85.
     return SeaGraph(cells, lat, lon, i, j, haversine_km(lat[i], lon[i], lat[j], lon[j]))
 
 
-def sea_cells(land: Land, ocean_res: int, max_res: int, max_lat: float) -> np.ndarray:
+def sea_cells(land: Land, ocean_res: int, max_res: int, max_lat: float, refine=tuple(STRAITS.values())) -> np.ndarray:
     """Cells of the adaptive sea tiling, from resolution 0 down."""
     nodes = []
     frontier = np.array(sorted(h3.get_res0_cells()), dtype=np.uint64)
     from_land = np.zeros(len(frontier), bool)  # parent was all land
-    for res in range(0, max_res + 1):
+    for res in range(0, max([max_res, *(r for _, r in refine)]) + 1):
+        if not len(frontier):
+            break
         lat, lon = np.array([h3.cell_to_latlng(int(c)) for c in frontier]).T
         inside = np.abs(lat) <= max_lat
         frontier, from_land, lat, lon = frontier[inside], from_land[inside], lat[inside], lon[inside]
@@ -74,17 +85,22 @@ def sea_cells(land: Land, ocean_res: int, max_res: int, max_lat: float) -> np.nd
         mixed = ~sea & ~all_land
         log.info("res %d: %d cells, %d sea, %d mixed, %d land", res, len(frontier), sea.sum(), mixed.sum(), all_land.sum())
 
+        limit = np.full(len(frontier), max_res)
+        for (x0, y0, x1, y1), r in refine:
+            box = (lon >= x0) & (lon <= x1) & (lat >= y0) & (lat <= y1)
+            limit[box] = np.maximum(limit[box], r)
+        last = res >= limit
         if res >= ocean_res:
             nodes.append(frontier[sea])
-            if res == max_res:
-                nodes.append(frontier[mixed][~land.contains(lat[mixed], lon[mixed])])
-                break
-            split = mixed
+            # A cell that still touches land at its finest level is kept if its centre is at sea.
+            done = mixed & last
+            nodes.append(frontier[done][~land.contains(lat[done], lon[done])])
+            split = mixed & ~last
         else:
             split = sea | mixed
         # Children of an all-land cell can stick out into the sea, so look one
         # level further before dropping them.
-        split_land = all_land & ~from_land
+        split_land = all_land & ~from_land & ~last
         parents = np.concatenate([frontier[split], frontier[split_land]])
         flags = np.concatenate([np.zeros(split.sum(), bool), np.ones(split_land.sum(), bool)])
         children = [np.array(h3.cell_to_children(int(c), res + 1), dtype=np.uint64) for c in parents]
