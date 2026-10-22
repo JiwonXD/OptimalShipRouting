@@ -182,9 +182,9 @@ def astar(graph: Graph, s: int, g: int) -> SearchResult:
     return SearchResult(np.array(lat), np.array(lon), np.array(on_link, bool), used, best[g], expanded, time.perf_counter() - t0)
 
 
-def straighten(land: Land, r: SearchResult) -> SearchResult:
+def straighten(land: Land, r: SearchResult, clearance_km: float = 0.0) -> SearchResult:
     """Cut the corners of a path: from each kept point, go straight to the farthest later point
-    the great-circle arc to which misses land. Links are kept as they are."""
+    the great-circle arc to which stays clearance_km off land. Links are kept as they are."""
     t0 = time.perf_counter()
     lat, lon = r.lat, np.degrees(np.unwrap(np.radians(r.lon)))  # continuous across ±180°
     fixed = np.zeros(len(lat), bool)
@@ -199,7 +199,7 @@ def straighten(land: Land, r: SearchResult) -> SearchResult:
         else:
             stop = i + 1 + int(np.argmax(fixed[i + 1 :]))
             cand = np.arange(i + 1, stop + 1)
-            clear = ~arcs_on_land(land, lat[i], lon[i], lat[cand], lon[cand])
+            clear = ~arcs_on_land(land, lat[i], lon[i], lat[cand], lon[cand], clearance_km=clearance_km)
             j = int(cand[clear][-1]) if clear.any() else i + 1
         on_link.append(bool(r.on_link[i]) and j == i + 1)
         keep.append(j)
@@ -209,11 +209,12 @@ def straighten(land: Land, r: SearchResult) -> SearchResult:
     return SearchResult(lat, lon, np.array(on_link, bool), r.links, km, r.expanded, time.perf_counter() - t0)
 
 
-def arcs_on_land(land: Land, lat0, lon0, lat1, lon1, piece_km: float = 20.0) -> np.ndarray:
-    """Whether each great-circle arc from (lat0, lon0) to (lat1, lon1) touches land.
+def arcs_on_land(land: Land, lat0, lon0, lat1, lon1, piece_km: float = 20.0, clearance_km: float = 0.0) -> np.ndarray:
+    """Whether each great-circle arc from (lat0, lon0) to (lat1, lon1) comes within clearance_km of land.
 
     An arc is cut into pieces of at most piece_km, each tested as a straight lon/lat line;
-    over 20 km the two differ by metres.
+    over 20 km the two differ by metres. The clearance is turned into degrees with the
+    longitude scale at the piece, so it is at least clearance_km in every direction.
     """
     lat0, lon0, lat1, lon1 = np.broadcast_arrays(*(np.atleast_1d(np.asarray(v, float)) for v in (lat0, lon0, lat1, lon1)))
     n = np.maximum(1, np.ceil(haversine_km(lat0, lon0, lat1, lon1) / piece_km)).astype(int)
@@ -223,10 +224,15 @@ def arcs_on_land(land: Land, lat0, lon0, lat1, lon1, piece_km: float = 20.0) -> 
     b_lat, b_lon = along(lat0[arc], lon0[arc], lat1[arc], lon1[arc], (k + 1) / n[arc])
     b_lon = a_lon + (b_lon - a_lon + 180) % 360 - 180  # a piece crossing ±180° runs past it
     a, b = np.column_stack([a_lon, a_lat]), np.column_stack([b_lon, b_lat])
-    hit = land.crosses(shapely.linestrings(np.stack([a, b], axis=1)))
+    deg = clearance_km / (111.32 * np.cos(np.radians((a_lat + b_lat) / 2)))
+
+    def touches(lines, k):
+        return land.crosses(lines) if clearance_km <= 0 else land.near(lines, deg[k])
+
+    hit = touches(shapely.linestrings(np.stack([a, b], axis=1)), slice(None))
     for shift, past in ((360.0, b_lon < -180), (-360.0, b_lon > 180)):
         if past.any():
-            hit[past] |= land.crosses(shapely.linestrings(np.stack([a[past] + [shift, 0], b[past] + [shift, 0]], axis=1)))
+            hit[past] |= touches(shapely.linestrings(np.stack([a[past] + [shift, 0], b[past] + [shift, 0]], axis=1)), past)
     return np.bincount(arc, weights=hit, minlength=len(n)) > 0
 
 
@@ -243,7 +249,7 @@ def along(lat0, lon0, lat1, lon1, f):
     return np.degrees(np.arctan2(u[2], np.hypot(u[0], u[1]))), np.degrees(np.arctan2(u[1], u[0]))
 
 
-def run(land: Land, min_step: float, links=()) -> list[dict]:
+def run(land: Land, min_step: float, links=(), clearance_km: float = 0.0) -> list[dict]:
     t0 = time.perf_counter()
     graph = Graph.build(land, min_step=min_step, links=links)
     build_s = time.perf_counter() - t0
@@ -260,6 +266,7 @@ def run(land: Land, min_step: float, links=()) -> list[dict]:
         row = {
             "route": name,
             "min_step": min_step,
+            "clearance_km": clearance_km,
             "snap_km": round(float(max(haversine_km(*start, graph.lat[s], graph.lon[s]), haversine_km(*goal, graph.lat[g], graph.lon[g]))), 1),
             "great_circle_km": round(float(haversine_km(*start, *goal))),
         }
@@ -269,7 +276,7 @@ def run(land: Land, min_step: float, links=()) -> list[dict]:
             row["error"] = str(e)
         else:
             near = [n for n, (la, lo) in CHECKPOINTS.items() if haversine_km(r.lat, r.lon, la, lo).min() < 50]
-            t = straighten(land, r)
+            t = straighten(land, r, clearance_km)
             row.update(
                 km=round(r.km),
                 expanded=r.expanded,
@@ -303,6 +310,7 @@ def main() -> None:
     parser.add_argument("out", help="results .json")
     parser.add_argument("--min-step", type=float, action="append", help="smallest cell side in degrees (repeatable)")
     parser.add_argument("--links", help="folder with the Overpass canal and strait files (see links.LINKS)")
+    parser.add_argument("--clearance-km", type=float, default=0.0, help="how far straightened legs keep off land")
     args = parser.parse_args()
     land = load_osm_land_polygons(args.land)
     links = []
@@ -310,7 +318,7 @@ def main() -> None:
         from shiprouting.sea.links import load_links
 
         links = load_links(args.links)
-    rows = [row for step in args.min_step or [1 / 32] for row in run(land, step, links)]
+    rows = [row for step in args.min_step or [1 / 32] for row in run(land, step, links, args.clearance_km)]
     with open(args.out, "w", encoding="utf-8") as f:
         json.dump(rows, f, ensure_ascii=False)
 
