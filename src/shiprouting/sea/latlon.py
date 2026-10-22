@@ -92,6 +92,9 @@ def astar(grid: LatLonGrid, start: tuple[float, float], goal: tuple[float, float
             n = (c[0] + di, (c[1] + dj) % cols)  # longitude wraps at ±180°
             if not 0 <= n[0] < rows or not grid.water[n] or n in closed:
                 continue
+            # A diagonal move must not cut a corner: both cells it passes between must be water.
+            if di and dj and not (grid.water[c[0] + di, c[1]] and grid.water[c[0], n[1]]):
+                continue
             cost = best[c] + dist(c, n)
             if cost < best.get(n, math.inf):
                 best[n] = cost

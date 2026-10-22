@@ -58,3 +58,10 @@ def test_latitudes_outside_the_ice_limit_are_blocked():
     g = LatLonGrid.build(LAND, 1.0)
     assert not g.water[g.cell(80.5, 0.5)] and not g.water[g.cell(-70.5, 0.5)]
     assert g.water[g.cell(60.5, 0.5)]
+
+
+def test_diagonal_moves_do_not_cut_land_corners(grid):
+    # Going round the corner from (-0.5, 0.5) south of the land to (0.5, -0.5) west of it
+    # must step through (-0.5, -0.5) instead of jumping diagonally over the land corner.
+    r = astar(grid, (-0.5, 0.5), (0.5, -0.5))
+    assert list(zip(r.lat, r.lon)) == [(-0.5, 0.5), (-0.5, -0.5), (0.5, -0.5)]
