@@ -17,6 +17,10 @@ from shiprouting.sea.land import Land
 
 EARTH_RADIUS_KM = 6371.0088
 MOVES = ((-1, -1), (-1, 0), (-1, 1), (0, -1), (0, 1), (1, -1), (1, 0), (1, 1))
+# Sea ice is not modelled yet; as a stand-in, cells outside these latitudes
+# count as blocked. 72°N keeps the Barents Sea and the Bering Strait open but
+# closes the Arctic passages; 60°S keeps the Drake Passage open.
+ICE_FREE = (-60.0, 72.0)
 
 
 def haversine_km(lat1, lon1, lat2, lon2):
@@ -32,11 +36,12 @@ class LatLonGrid:
     water: np.ndarray  # (rows, cols) bool; row 0 is the southernmost
 
     @classmethod
-    def build(cls, land: Land, step: float) -> "LatLonGrid":
+    def build(cls, land: Land, step: float, lat_limits: tuple[float, float] = ICE_FREE) -> "LatLonGrid":
         lat = -90 + step / 2 + step * np.arange(round(180 / step))
         lon = -180 + step / 2 + step * np.arange(round(360 / step))
         lon2, lat2 = np.meshgrid(lon, lat)
         water = ~land.contains(lat2.ravel(), lon2.ravel()).reshape(lat2.shape)
+        water &= (lat2 >= lat_limits[0]) & (lat2 <= lat_limits[1])
         return cls(step, water)
 
     def center(self, i: int, j: int) -> tuple[float, float]:

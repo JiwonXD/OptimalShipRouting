@@ -9,7 +9,7 @@ LAND = Land([shapely.box(0.0, 0.0, 20.0, 20.0)])
 
 @pytest.fixture(scope="module")
 def grid():
-    return LatLonGrid.build(LAND, 1.0)
+    return LatLonGrid.build(LAND, 1.0, lat_limits=(-90.0, 90.0))
 
 
 def test_grid_marks_cells_with_centres_on_land(grid):
@@ -52,3 +52,9 @@ def test_land_check_across_the_dateline():
     land = Land([shapely.box(-180.0, -1.0, -179.8, 1.0)])
     assert segments_on_land(land, np.array([0.0, 0.0]), np.array([179.9, -179.9])) == 1
     assert segments_on_land(land, np.array([5.0, 5.0]), np.array([179.9, -179.9])) == 0
+
+
+def test_latitudes_outside_the_ice_limit_are_blocked():
+    g = LatLonGrid.build(LAND, 1.0)
+    assert not g.water[g.cell(80.5, 0.5)] and not g.water[g.cell(-70.5, 0.5)]
+    assert g.water[g.cell(60.5, 0.5)]
