@@ -1,12 +1,16 @@
-"""First attempt at choosing the speed: each move at whichever of a few speeds burns the least fuel.
+"""Route and speed together: the least fuel arriving by a given time, each move at one of a few speeds.
 
 Every speed has its own FuelCost in moving weather. When the search expands a cell, each
-move is costed at every speed, at the time the ship reaches the cell, and the cheapest is
-taken; the clock (hours) advances by that move's time at that speed. Links are taken at
-the cheapest calm-water speed. There is no arrival time to meet.
+move is costed at every speed, at the time the ship reaches the cell; the clock (hours)
+advances by that move's time at the speed taken. Links are taken at calm-water rates.
+
+Time is not part of the search state. Instead each hour is given a price in kg of fuel
+(per_hour), each move takes the speed with the least fuel + price × hours, and the
+search minimises that sum. Price 0 sails at the slowest speed; a higher price sails
+faster. meet_eta bisects the price until the route arrives just within the given time.
 """
 
-import heapq
+import dataclasses
 import math
 import time
 from dataclasses import dataclass
@@ -15,27 +19,30 @@ import numpy as np
 
 from shiprouting.route.fuel import KNOT, FuelCost
 from shiprouting.sea.latlon import SearchResult, haversine_km
-from shiprouting.sea.quadtree import Graph, link_jumps, trace
+from shiprouting.sea.quadtree import Graph, astar
 
 
 @dataclass
 class SpeedChoice:
     costs: list[FuelCost]  # one per speed, moving weather, same departure
+    per_hour: float = 0.0  # the price of an hour, kg of fuel
 
     def edge_cost(self, graph: Graph):
-        """edge_cost function for quadtree.astar, its clock in hours."""
+        """edge_cost function for quadtree.astar, its clock in hours: fuel + per_hour × hours."""
         per_speed = [c.costs(graph) for c in self.costs]
 
         def costs(c, hours):
             kg, h = (np.array(v) for v in zip(*(f(c, hours) for f in per_speed)))  # (speeds, moves)
-            pick = np.argmin(kg, axis=0)
+            total = kg + self.per_hour * h
+            pick = np.argmin(total, axis=0)
             moves = np.arange(kg.shape[1])
-            return kg[pick, moves], h[pick, moves]
+            return total[pick, moves], h[pick, moves]
 
         return costs
 
     def link_cost(self, link, km: float, hours: float) -> tuple[float, float]:
-        return min((c.link_cost(link, km, hours) for c in self.costs), key=lambda kg_h: kg_h[0])
+        kg, h = min((c.link_cost(link, km, hours) for c in self.costs), key=lambda kg_h: kg_h[0] + self.per_hour * kg_h[1])
+        return kg + self.per_hour * h, h
 
     def speeds_kn(self, r: SearchResult) -> np.ndarray:
         """The speed of each segment of a path found with edge_cost, knots."""
@@ -55,72 +62,52 @@ class SpeedChoice:
         return float(kg)
 
 
-def eta_search(graph: Graph, s: int, g: int, choice: SpeedChoice, eta_hours: float, bin_hours: float = 1.0,
-               max_seconds: float = math.inf, max_states: float = math.inf) -> SearchResult:
-    """Least fuel from s to g arriving within eta_hours, each move at any of the choice's speeds.
+def meet_eta(graph: Graph, s: int, g: int, choice: SpeedChoice, eta_hours: float, tolerance: float = 0.002,
+             max_tries: int = 12, max_seconds: float = math.inf) -> tuple[SearchResult | None, list[dict]]:
+    """The least-fuel route found arriving within eta_hours, bisecting the price of an hour.
 
-    The time is part of the search state: a cell reached in different hours (bins of
-    bin_hours) is a different state, because the weather ahead depends on when the ship
-    gets there. Moves after which even the top speed could not reach g in time (great
-    circle) are dropped.
+    Stops when a route arrives within a fraction `tolerance` of the voyage before the ETA, or after max_tries
+    searches. Returns the best route that arrived in time (None if none did) and a log of
+    the tries.
     """
-    t0 = time.perf_counter()
-    per_speed = [c.costs(graph) for c in choice.costs]
-    top_kmh = max(c.speed for c in choice.costs) * 3.6
+    tries, best = [], None
 
-    def too_late(n, hours):
-        return hours + float(haversine_km(graph.lat[n], graph.lon[n], graph.lat[g], graph.lon[g])) / top_kmh > eta_hours
+    def search(per_hour):
+        choice.per_hour = per_hour
+        r = astar(graph, s, g, choice.edge_cost(graph), choice.link_cost, lambda n: 0.0, max_seconds)
+        fuel = r.cost - per_hour * float(r.clock[-1])
+        tries.append({"per_hour": round(per_hour, 1), "hours": round(float(r.clock[-1]), 1), "fuel_t": round(fuel / 1000, 2),
+                      "seconds": round(r.seconds, 1)})
+        print(f"  price {per_hour:8.1f} kg/h: {r.clock[-1]:7.1f} h, {fuel / 1000:8.2f} t, {r.seconds:5.1f} s", flush=True)
+        return r, fuel
 
-    jumps = link_jumps(graph)
-
-    start = (s, 0)
-    best, clock, parent = {start: 0.0}, {start: 0.0}, {start: None}
-    closed, open_list, expanded = set(), [(0.0, start)], 0
-    while open_list:
-        _, state = heapq.heappop(open_list)
-        if state in closed:
-            continue
-        closed.add(state)
-        expanded += 1
-        c = state[0]
-        if c == g:
+    lo, hi = 0.0, 1000.0
+    while len(tries) < max_tries:
+        r, fuel = search(hi)
+        if r.clock[-1] <= eta_hours:
+            best = (r, fuel)
             break
-        if time.perf_counter() - t0 > max_seconds or len(best) > max_states:
-            raise TimeoutError(f"stopped after {time.perf_counter() - t0:.0f} s ({expanded} states expanded, {len(best)} reached)")
-        lo, hi = graph.indptr[c], graph.indptr[c + 1]
-        moves = []
-        for f in per_speed:
-            kg, h = f(c, clock[state])
-            moves += [(int(n), float(w), float(dt), None, False) for n, w, dt in zip(graph.indices[lo:hi], kg, h)]
-        for n, km, link, rev in jumps.get(c, []):
-            moves += [(n, *cost.link_cost(link, km, clock[state]), link, rev) for cost in choice.costs]
-        for n, w, dt, link, rev in moves:
-            hours = clock[state] + dt
-            if too_late(n, hours):
-                continue
-            nxt = (n, int(hours // bin_hours))
-            cost = best[state] + w
-            if nxt not in closed and cost < best.get(nxt, math.inf):
-                best[nxt], clock[nxt], parent[nxt] = cost, hours, (state, link, rev)
-                heapq.heappush(open_list, (cost, nxt))
-    else:
-        raise ValueError(f"no route arrives within {eta_hours:g} h ({expanded} states expanded)")
-
-    steps = [(state, None, False)]  # from the goal back
-    while parent[steps[-1][0]] is not None:
-        prev, link, rev = parent[steps[-1][0]]
-        steps[-1] = (steps[-1][0], link, rev)
-        steps.append((prev, None, False))
-    steps = [(st[0], clock[st], link, rev) for st, link, rev in reversed(steps)]
-    return trace(graph, steps, expanded, time.perf_counter() - t0, best[state])
+        lo, hi = hi, hi * 4
+    while best is not None and len(tries) < max_tries and best[0].clock[-1] < eta_hours * (1 - tolerance):
+        mid = (lo + hi) / 2
+        r, fuel = search(mid)
+        if r.clock[-1] <= eta_hours:
+            hi = mid
+            if fuel < best[1]:
+                best = (r, fuel)
+        else:
+            lo = mid
+    if best is None:
+        return None, tries
+    r, fuel = best
+    return dataclasses.replace(r, cost=fuel), tries
 
 
-def run(graph: Graph, ship, forecast, speeds_kn, fixed_kn: float, bin_hours: float, max_seconds: float, max_states: float) -> list[dict]:
+def run(graph: Graph, ship, forecast, speeds_kn, fixed_kn: float, max_tries: int, max_seconds: float) -> list[dict]:
     """For each test voyage, the moving-weather route at a fixed speed against the least-fuel one
     choosing speeds that arrives no later."""
     from shiprouting.fuel.waves import AddedResistanceTable
     from shiprouting.sea.latlon import ROUTES
-    from shiprouting.sea.quadtree import astar
 
     departure = forecast.time[0]
     costs = {}
@@ -134,12 +121,14 @@ def run(graph: Graph, ship, forecast, speeds_kn, fixed_kn: float, bin_hours: flo
     for name, (start, goal) in ROUTES.items():
         s, g = graph.nearest(*start), graph.nearest(*goal)
         row = {"route": name, "departure": str(departure)}
+        print(name, flush=True)
         found = {"fixed": astar(graph, s, g, fixed.costs(graph), fixed.link_cost, lambda n: 0.0)}
         eta = float(found["fixed"].clock[-1])
-        try:
-            found["eta"] = eta_search(graph, s, g, choice, eta, bin_hours, max_seconds, max_states)
-        except (TimeoutError, ValueError) as e:
-            row["eta"] = {"error": str(e)}
+        t0 = time.perf_counter()
+        r, row["tries"] = meet_eta(graph, s, g, choice, eta, max_tries=max_tries, max_seconds=max_seconds)
+        row["eta_seconds"] = round(time.perf_counter() - t0, 1)
+        if r is not None:
+            found["eta"] = r
         for key, r in found.items():
             kn = choice.speeds_kn(r)
             row[key] = {
@@ -176,9 +165,8 @@ def main() -> None:
     parser.add_argument("--links", help="folder with the Overpass canal and strait files (see links.LINKS)")
     parser.add_argument("--speeds-kn", default="12,14,16,18,20", help="speeds to choose from, comma-separated")
     parser.add_argument("--fixed-kn", type=float, default=16.0, help="the fixed speed to compare with")
-    parser.add_argument("--bin-hours", type=float, default=1.0, help="time resolution of the search state")
+    parser.add_argument("--max-tries", type=int, default=12, help="searches per voyage to meet the arrival time")
     parser.add_argument("--max-seconds", type=float, default=600.0, help="give up a search after this long")
-    parser.add_argument("--max-states", type=float, default=2e7, help="give up a search after reaching this many states")
     args = parser.parse_args()
 
     land = load_osm_land_polygons(args.land)
@@ -192,7 +180,7 @@ def main() -> None:
     print(f"graph: {len(graph.lat)} cells, built in {time.perf_counter() - t0:.0f} s", flush=True)
     forecast = ecmwf.load(sorted(glob.glob(args.forecast)))
     speeds = [float(v) for v in args.speeds_kn.split(",")]
-    rows = run(graph, KCS_SHIP, forecast, speeds, args.fixed_kn, args.bin_hours, args.max_seconds, args.max_states)
+    rows = run(graph, KCS_SHIP, forecast, speeds, args.fixed_kn, args.max_tries, args.max_seconds)
     with open(args.out, "w", encoding="utf-8") as f:
         json.dump(rows, f, ensure_ascii=False)
 

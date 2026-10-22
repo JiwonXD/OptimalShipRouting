@@ -122,20 +122,6 @@ def join(land: Land, graph: Graph, lat: float, lon: float, tries: int = 100):
     return int(near[np.argmax(clear)]) if clear.any() else None
 
 
-def link_jumps(graph: Graph) -> dict:
-    """node -> [(node at the link's other end, km including the hops to the link, link, reversed)]."""
-    jumps = {}
-    for a, b, link in graph.links:
-        km = (
-            float(haversine_km(graph.lat[a], graph.lon[a], link.lat[0], link.lon[0]))
-            + link.km
-            + float(haversine_km(graph.lat[b], graph.lon[b], link.lat[-1], link.lon[-1]))
-        )
-        jumps.setdefault(a, []).append((b, km, link, False))
-        jumps.setdefault(b, []).append((a, km, link, True))
-    return jumps
-
-
 def astar(
     graph: Graph, s: int, g: int, edge_cost=None, link_cost=None, heuristic=None, max_seconds: float = math.inf
 ) -> SearchResult:
@@ -156,7 +142,15 @@ def astar(
 
     h = heuristic or h
 
-    jumps = link_jumps(graph)
+    jumps = {}  # node -> [(node, km, link, reversed)]
+    for a, b, link in graph.links:
+        km = (
+            float(haversine_km(graph.lat[a], graph.lon[a], link.lat[0], link.lon[0]))
+            + link.km
+            + float(haversine_km(graph.lat[b], graph.lon[b], link.lat[-1], link.lon[-1]))
+        )
+        jumps.setdefault(a, []).append((b, km, link, False))
+        jumps.setdefault(b, []).append((a, km, link, True))
     edge_cost = graph.km if edge_cost is None else edge_cost
     link_cost = link_cost or (lambda link, km, clock: (km, km))
 
@@ -190,36 +184,30 @@ def astar(
     else:
         raise ValueError(f"no route ({expanded} cells expanded)")
 
-    steps = [(g, clock[g], None, False)]  # from goal back to start, each with the link that led into it
-    while parent[steps[-1][0]] is not None:
-        c, link, rev = parent[steps[-1][0]]
-        steps[-1] = (*steps[-1][:2], link, rev)
-        steps.append((c, clock[c], None, False))
-    return trace(graph, steps[::-1], expanded, time.perf_counter() - t0, best[g])
-
-
-def trace(graph: Graph, steps, expanded: int, seconds: float, cost: float) -> SearchResult:
-    """The SearchResult of a path given as (node, clock, link taken into it, reversed) from the start."""
-    s = steps[0][0]
-    lat, lon, at = [graph.lat[s]], [graph.lon[s]], [steps[0][1]]
+    nodes, via = [g], []  # from goal back to start, each with the link that led into it
+    while parent[nodes[-1]] is not None:
+        c, link, rev = parent[nodes[-1]]
+        via.append((link, rev))
+        nodes.append(c)
+    lat, lon, at = [graph.lat[s]], [graph.lon[s]], [clock[s]]
     on_link, used = [], []
-    for n, t, link, rev in steps[1:]:
+    for n, (link, rev) in zip(reversed(nodes[:-1]), reversed(via)):
         if link is not None:
             pts_lat, pts_lon = (link.lat[::-1], link.lon[::-1]) if rev else (link.lat, link.lon)
             hop = haversine_km(np.r_[lat[-1], pts_lat], np.r_[lon[-1], pts_lon], np.r_[pts_lat, graph.lat[n]], np.r_[pts_lon, graph.lon[n]])
             share = np.cumsum(hop)[:-1] / hop.sum()
-            at += list(at[-1] + share * (t - at[-1]))
+            at += list(at[-1] + share * (clock[n] - at[-1]))
             lat += list(pts_lat)
             lon += list(pts_lon)
             on_link += [False] + [True] * (len(pts_lat) - 1)
             used.append(link.name)
         lat.append(graph.lat[n])
         lon.append(graph.lon[n])
-        at.append(t)
+        at.append(clock[n])
         on_link.append(False)
     lat, lon = np.array(lat), np.array(lon)
     km = float(haversine_km(lat[:-1], lon[:-1], lat[1:], lon[1:]).sum())
-    return SearchResult(lat, lon, np.array(on_link, bool), used, km, expanded, seconds, cost, np.array(at))
+    return SearchResult(lat, lon, np.array(on_link, bool), used, km, expanded, time.perf_counter() - t0, best[g], np.array(at))
 
 
 def straighten(land: Land, r: SearchResult, clearance_km: float = 0.0) -> SearchResult:
