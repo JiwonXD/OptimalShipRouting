@@ -24,7 +24,7 @@ from shiprouting.sea.quadtree import Graph, astar
 
 @dataclass
 class SpeedChoice:
-    costs: list[FuelCost]  # one per speed, moving weather, same departure
+    costs: list[FuelCost]  # one per speed, slowest first, moving weather, same departure
     per_hour: float = 0.0  # the price of an hour, kg of fuel
 
     def edge_cost(self, graph: Graph):
@@ -62,13 +62,51 @@ class SpeedChoice:
         return float(kg)
 
 
+    def fill_slack(self, r: SearchResult, eta_hours: float, rounds: int = 20) -> SearchResult:
+        """Spend the time a found path leaves before eta_hours: step segments down to the next
+        slower speed, those saving the most fuel per extra hour first. Each round re-costs the
+        whole path at its new times and stops when that no longer saves fuel."""
+        speeds = np.array([c.speed for c in self.costs])  # m/s
+        seg_km = haversine_km(r.lat[:-1], r.lon[:-1], r.lat[1:], r.lon[1:])
+        seg = np.arange(len(seg_km))
+        sea = np.nonzero(~r.on_link)[0]
+
+        def evaluate(k):
+            clock = np.r_[0.0, np.cumsum(seg_km / (speeds[k] * 3.6))]
+            kg = np.empty((len(speeds), len(seg_km)))  # every speed, setting out at the profile's times
+            for j, c in enumerate(self.costs):
+                kg[j] = seg_km * c.calm_kg_per_km
+                kg[j, sea] = c.kg(r.lat[sea], r.lon[sea], r.lat[sea + 1], r.lon[sea + 1], clock[sea])
+            return clock, kg, kg[k, seg].sum()
+
+        k = np.argmin(np.abs(self.speeds_kn(r)[:, None] - speeds[None, :] / KNOT), axis=1)
+        clock, kg, fuel = evaluate(k)
+        for _ in range(rounds):
+            slower = np.maximum(k - 1, 0)
+            extra = seg_km / (speeds[slower] * 3.6) - seg_km / (speeds[k] * 3.6)
+            saving = kg[k, seg] - kg[slower, seg]
+            worth = np.nonzero((k > 0) & (saving > 0))[0]
+            worth = worth[np.argsort(-saving[worth] / extra[worth])]
+            take = worth[np.cumsum(extra[worth]) <= eta_hours - clock[-1]]
+            if len(take) == 0:
+                break
+            k2 = k.copy()
+            k2[take] -= 1
+            clock2, kg2, fuel2 = evaluate(k2)
+            if fuel2 >= fuel:
+                break
+            k, clock, kg, fuel = k2, clock2, kg2, fuel2
+        return dataclasses.replace(r, clock=clock, cost=float(fuel))
+
+
 def meet_eta(graph: Graph, s: int, g: int, choice: SpeedChoice, eta_hours: float, tolerance: float = 0.002,
              max_tries: int = 12, max_seconds: float = math.inf) -> tuple[SearchResult | None, list[dict]]:
     """The least-fuel route found arriving within eta_hours, bisecting the price of an hour.
 
     Stops when a route arrives within a fraction `tolerance` of the voyage before the ETA, or after max_tries
-    searches. Returns the best route that arrived in time (None if none did) and a log of
-    the tries.
+    searches. The best route that arrived in time then spends the time it has left
+    (SpeedChoice.fill_slack). Returns that route (None if none arrived in time) and a log
+    of the tries.
     """
     tries, best = [], None
 
@@ -100,7 +138,7 @@ def meet_eta(graph: Graph, s: int, g: int, choice: SpeedChoice, eta_hours: float
     if best is None:
         return None, tries
     r, fuel = best
-    return dataclasses.replace(r, cost=fuel), tries
+    return choice.fill_slack(dataclasses.replace(r, cost=fuel), eta_hours), tries
 
 
 def run(graph: Graph, ship, forecast, speeds_kn, fixed_kn: float, max_tries: int, max_seconds: float) -> list[dict]:
@@ -116,7 +154,7 @@ def run(graph: Graph, ship, forecast, speeds_kn, fixed_kn: float, max_tries: int
         waves = AddedResistanceTable.build(ship.seakeeping, kn * KNOT)
         costs[kn] = FuelCost(ship, forecast, departure, kn * KNOT, waves, frozen=False)
         print(f"{kn:g} kn: wave added resistance table built in {time.perf_counter() - t0:.0f} s", flush=True)
-    fixed, choice = costs[fixed_kn], SpeedChoice([costs[kn] for kn in speeds_kn])
+    fixed, choice = costs[fixed_kn], SpeedChoice([costs[kn] for kn in sorted(speeds_kn)])
     rows = []
     for name, (start, goal) in ROUTES.items():
         s, g = graph.nearest(*start), graph.nearest(*goal)

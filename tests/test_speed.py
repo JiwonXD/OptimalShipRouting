@@ -30,7 +30,7 @@ def test_without_an_arrival_time_the_slowest_speed_wins():
     assert r.cost == pytest.approx(sc.path(r))
 
 
-def test_meeting_an_arrival_time_takes_less_fuel_than_a_fixed_speed():
+def test_meeting_a_fixed_speeds_arrival_time_takes_no_more_fuel():
     graph = Graph.build(Land([shapely.box(100.0, 30.0, 101.0, 31.0)]), root=1.0, min_step=0.5, lat_limits=(-20.0, 20.0))
     fc = forecast(wind_u=-10.0, Hs=2.0, wave_from_x=1.0, T_m10=8.0)
     fc.fields["wind_u"][1] = 10.0  # the head wind turns into a following wind
@@ -40,6 +40,20 @@ def test_meeting_an_arrival_time_takes_less_fuel_than_a_fixed_speed():
     r16 = astar(graph, s, g, fixed.costs(graph), fixed.link_cost, lambda n: 0.0)
     r, tries = meet_eta(graph, s, g, sc, r16.clock[-1], tolerance=0.01)
     assert r.clock[-1] <= r16.clock[-1]
-    assert r.cost < r16.cost
+    assert r.cost <= r16.cost * (1 + 1e-9)  # here the best mix at that time is 16 kn throughout
     assert r.cost == pytest.approx(sc.path(r))
     assert len(tries) > 1
+
+
+def test_time_left_before_the_eta_is_spent_slowing_down():
+    graph = Graph.build(Land([shapely.box(100.0, 30.0, 101.0, 31.0)]), root=1.0, min_step=0.5, lat_limits=(-20.0, 20.0))
+    sc = choice(forecast(wind_u=-10.0, Hs=2.0, wave_from_x=1.0, T_m10=8.0), (12, 14, 16, 18))
+    s, g = graph.nearest(0.5, 150.5), graph.nearest(0.5, 156.5)
+    fixed = sc.costs[2]  # 16 kn
+    r16 = astar(graph, s, g, fixed.costs(graph), fixed.link_cost, lambda n: 0.0)
+    eta = r16.clock[-1] * 1.1
+    r = sc.fill_slack(r16, eta)
+    assert r16.clock[-1] < r.clock[-1] <= eta
+    assert r.cost < r16.cost
+    assert r.cost == pytest.approx(sc.path(r))
+    assert set(np.round(sc.speeds_kn(r), 6)) == {14.0, 16.0}
