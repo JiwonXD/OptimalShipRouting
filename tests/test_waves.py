@@ -63,3 +63,17 @@ def test_following_seas_cost_less_than_head_seas():
     head = waves.added_resistance(KCS_SEAKEEPING, 3.0, 8.0, 0.0, V)
     following = waves.added_resistance(KCS_SEAKEEPING, 3.0, 8.0, math.pi, V)
     assert 0 < following < head
+
+
+def test_stern_oblique_motion_part_interpolates_beam_and_following_values():
+    # ITTC: R_AWM for π/2 ≤ α ≤ π is linear between the values in beam and following waves,
+    # each evaluated entirely at its own angle (including ω̄).
+    V = 16 * KNOT
+    for ratio in (0.5, 0.8, 1.0, 1.2):
+        omega = math.sqrt(2 * math.pi * G / (ratio * KCS_SEAKEEPING.L))
+        beam = waves._mean_wave_resistance(KCS_SEAKEEPING, omega, math.pi / 2, V, 1025.0)
+        following = waves._mean_wave_resistance(KCS_SEAKEEPING, omega, math.pi, V, 1025.0)
+        for deg in (100, 135, 170):
+            w = (deg - 90) / 90
+            R = waves._mean_wave_resistance(KCS_SEAKEEPING, omega, math.radians(deg), V, 1025.0)
+            assert R == pytest.approx((1 - w) * beam + w * following)

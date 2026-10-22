@@ -39,22 +39,22 @@ def _mean_wave_resistance(sk: Seakeeping, omega: float, alpha: float, speed: flo
     V_g = G / (2 * omega)  # group velocity of deep-water waves
     Fr_rel = (speed - V_g) / math.sqrt(G * L)
 
-    omega_bar = (
-        2.142
-        * sk.k_yy ** (1 / 3)
-        * math.sqrt(L / (2 * math.pi * G))
-        * (C_B / 0.65) ** 0.17
-        * (1 - 0.111 / C_B * (math.log(B / T) - math.log(2.75)))
-        * ((-1.377 * Fr**2 + 1.157 * Fr) * abs(math.cos(alpha)) + 0.618 * (13 + math.cos(2 * alpha)) / 14)
-        * omega
-    )
-    if omega_bar < 1:
-        b1, d1 = 11.0, 566 * (L * C_B / B) ** -2.66
-    else:
-        b1, d1 = -8.5, -566 * (L / B) ** -2.66 * (4 - 125 * trim)
     a3 = 1.0 + 28.7 * trim
 
     def at(a: float) -> float:
+        omega_bar = (
+            2.142
+            * sk.k_yy ** (1 / 3)
+            * math.sqrt(L / (2 * math.pi * G))
+            * (C_B / 0.65) ** 0.17
+            * (1 - 0.111 / C_B * (math.log(B / T) - math.log(2.75)))
+            * ((-1.377 * Fr**2 + 1.157 * Fr) * abs(math.cos(a)) + 0.618 * (13 + math.cos(2 * a)) / 14)
+            * omega
+        )
+        if omega_bar < 1:
+            b1, d1 = 11.0, 566 * (L * C_B / B) ** -2.66
+        else:
+            b1, d1 = -8.5, -566 * (L / B) ** -2.66 * (4 - 125 * trim)
         if a <= math.pi / 2:
             a1 = (0.87 / C_B) ** ((1 + Fr) * math.cos(a)) / math.log(B / T) * (1 + 2 * math.cos(a)) / 3
             a2 = 0.0072 + 0.1676 * Fr if Fr < 0.12 else Fr**1.5 * math.exp(-3.5 * Fr)
@@ -77,7 +77,7 @@ def _mean_wave_resistance(sk: Seakeeping, omega: float, alpha: float, speed: flo
 
     if alpha <= math.pi / 2:
         return at(alpha)
-    # Stern-oblique seas: linear between beam and following seas.
+    # Stern-oblique seas: linear between the full beam-sea and following-sea values.
     w = (alpha - math.pi / 2) / (math.pi / 2)
     return (1 - w) * at(math.pi / 2) + w * at(math.pi)
 
