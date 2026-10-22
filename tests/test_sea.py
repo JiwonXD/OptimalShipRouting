@@ -92,3 +92,29 @@ def test_load_land_polygons_from_shapefile(tmp_path):
                       geometry_type="Polygon", crs="EPSG:4326")
     land = load_osm_land_polygons(tmp_path / "land.shp")
     assert land.contains([0.5, 1.5], [0.5, 1.5]).tolist() == [True, False]
+
+
+def test_canal_through_land(tmp_path, graph):
+    import json
+
+    from shiprouting.sea.canals import from_overpass
+
+    # Two ways crossing the square continent from west to east along 10°N, plus a dead-end stub.
+    ways = [
+        {"type": "way", "nodes": [1, 2, 3], "geometry": [
+            {"lat": 10.0, "lon": -0.5}, {"lat": 10.0, "lon": 5.0}, {"lat": 10.0, "lon": 10.0}]},
+        {"type": "way", "nodes": [3, 4, 5], "geometry": [
+            {"lat": 10.0, "lon": 10.0}, {"lat": 10.0, "lon": 15.0}, {"lat": 10.0, "lon": 20.5}]},
+        {"type": "way", "nodes": [3, 6], "geometry": [{"lat": 10.0, "lon": 10.0}, {"lat": 12.0, "lon": 10.0}]},
+    ]
+    path = tmp_path / "canal.json"
+    path.write_text(json.dumps({"elements": ways}))
+    canal = from_overpass("Test", path, ends=((10.0, -0.5), (10.0, 20.5)))
+    assert canal.lon.tolist() == [-0.5, 5.0, 10.0, 15.0, 20.5]
+    assert canal.length_km == pytest.approx(haversine_km(10.0, -0.5, 10.0, 20.5), rel=1e-3)
+
+    start, end = (10.0, -5.0), (10.0, 25.0)
+    without = Router(graph, LAND).route(start, end)
+    lat, lon = Router(graph, LAND, canals=(canal,)).route(start, end)
+    assert length_km(lat, lon) < length_km(*without)
+    assert 5.0 in lon.tolist() and 15.0 in lon.tolist()  # follows the centreline through the land

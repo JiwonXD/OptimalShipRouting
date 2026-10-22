@@ -5,6 +5,7 @@ from scipy.sparse import coo_matrix
 from scipy.sparse.csgraph import dijkstra
 from scipy.spatial import cKDTree
 
+from shiprouting.sea.canals import Canal
 from shiprouting.sea.geometry import great_circle_points, haversine_km, path_geometry
 from shiprouting.sea.grid import SeaGraph
 from shiprouting.sea.land import Land
@@ -16,16 +17,27 @@ def _unit(lat, lon):
 
 
 class Router:
-    def __init__(self, graph: SeaGraph, land: Land):
+    def __init__(self, graph: SeaGraph, land: Land, canals: tuple[Canal, ...] = ()):
         self.graph = graph
         self.land = land
-        n = len(graph.cells)
-        w = np.concatenate([graph.edge_km, graph.edge_km])
-        self.matrix = coo_matrix(
-            (w, (np.concatenate([graph.edge_i, graph.edge_j]), np.concatenate([graph.edge_j, graph.edge_i]))),
-            shape=(n, n),
-        ).tocsr()
         self.tree = cKDTree(_unit(graph.lat, graph.lon))
+        # A canal is one edge between the sea nodes nearest its two ends.
+        self.canals = {}
+        i, j, km = [graph.edge_i], [graph.edge_j], [graph.edge_km]
+        for canal in canals:
+            a = self.nearest_node(canal.lat[0], canal.lon[0])
+            b = self.nearest_node(canal.lat[-1], canal.lon[-1])
+            ends = haversine_km(graph.lat[[a, b]], graph.lon[[a, b]], canal.lat[[0, -1]], canal.lon[[0, -1]])
+            self.canals[a, b] = (canal.lat, canal.lon)
+            self.canals[b, a] = (canal.lat[::-1], canal.lon[::-1])
+            i.append([a])
+            j.append([b])
+            km.append([canal.length_km + ends.sum()])
+        i, j, km = np.concatenate(i), np.concatenate(j), np.concatenate(km)
+        n = len(graph.cells)
+        self.matrix = coo_matrix(
+            (np.concatenate([km, km]), (np.concatenate([i, j]), np.concatenate([j, i]))), shape=(n, n)
+        ).tocsr()
 
     def nearest_node(self, lat: float, lon: float) -> int:
         return int(self.tree.query(_unit([lat], [lon])[0])[1])
@@ -62,10 +74,49 @@ class Router:
     def route(self, start: tuple[float, float], end: tuple[float, float]) -> tuple[np.ndarray, np.ndarray]:
         """Waypoints (lat, lon) from ``start`` to ``end``, each a (lat, lon) pair at sea."""
         nodes = self.shortest_nodes(self.nearest_node(*start), self.nearest_node(*end))
-        lat = np.concatenate([[start[0]], self.graph.lat[nodes], [end[0]]])
-        lon = np.concatenate([[start[1]], self.graph.lon[nodes], [end[1]]])
-        return self.straighten(lat, lon)
+        lat, lon = [[start[0]]], [[start[1]]]
+        for k, u in enumerate(nodes):
+            lat.append([self.graph.lat[u]])
+            lon.append([self.graph.lon[u]])
+            if k + 1 < len(nodes) and (u, nodes[k + 1]) in self.canals:
+                c_lat, c_lon = self.canals[u, nodes[k + 1]]
+                lat.append(c_lat)
+                lon.append(c_lon)
+        lat.append([end[0]])
+        lon.append([end[1]])
+        return self.straighten(np.concatenate(lat), np.concatenate(lon))
 
 
 def length_km(lat, lon) -> float:
     return float(np.sum(haversine_km(lat[:-1], lon[:-1], lat[1:], lon[1:])))
+
+
+def main() -> None:
+    import argparse
+    import json
+
+    from shiprouting.sea.canals import from_overpass
+    from shiprouting.sea.land import load_osm_land_polygons
+
+    parser = argparse.ArgumentParser(description="Shortest sea route between two points.")
+    parser.add_argument("graph", help="sea graph .npz")
+    parser.add_argument("land", help="land polygons shapefile")
+    parser.add_argument("start", help="lat,lon")
+    parser.add_argument("end", help="lat,lon")
+    parser.add_argument("--canal", action="append", default=[], help="NAME=overpass.json (NAME in canals.ENDS)")
+    parser.add_argument("--geojson", help="write the route as GeoJSON")
+    args = parser.parse_args()
+
+    canals = tuple(from_overpass(*c.split("=", 1)) for c in args.canal)
+    router = Router(SeaGraph.load(args.graph), load_osm_land_polygons(args.land), canals)
+    start, end = (tuple(float(x) for x in p.split(",")) for p in (args.start, args.end))
+    lat, lon = router.route(start, end)
+    print(f"{length_km(lat, lon):.0f} km, {len(lat)} waypoints")
+    if args.geojson:
+        line = {"type": "LineString", "coordinates": [[float(x), float(y)] for x, y in zip(lon, lat)]}
+        with open(args.geojson, "w") as f:
+            json.dump({"type": "Feature", "geometry": line, "properties": {"km": length_km(lat, lon)}}, f)
+
+
+if __name__ == "__main__":
+    main()
