@@ -44,7 +44,9 @@ class LatLonGrid:
         lon2, lat2 = np.meshgrid(lon, lat)
         water = ~land.contains(lat2.ravel(), lon2.ravel()).reshape(lat2.shape)
         water &= (lat2 >= lat_limits[0]) & (lat2 <= lat_limits[1])
-        return cls(step, water, open_moves(land, water, lat2, lon2, step))
+        moves = open_moves(land, water, lat2, lon2, step)
+        # A water cell with no open move cannot be reached or left; a port snapped onto one has no route.
+        return cls(step, water & moves.any(axis=2), moves)
 
     def center(self, i: int, j: int) -> tuple[float, float]:
         return -90 + self.step * (i + 0.5), -180 + self.step * (j + 0.5)

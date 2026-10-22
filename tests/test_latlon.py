@@ -91,3 +91,10 @@ def test_moves_wrap_and_see_land_across_the_dateline():
     assert not g.moves[g.cell(0.5, 179.5)][MOVES.index((0, 1))]
     assert g.moves[g.cell(10.5, 179.5)][MOVES.index((0, 1))]
     assert not g.moves[g.cell(0.5, -179.5)][MOVES.index((0, -1))]
+
+
+def test_water_cells_with_no_open_move_are_not_water():
+    # A pocket of water ringed by land touches land on every line out of it.
+    ring = shapely.box(4.0, 4.0, 7.0, 7.0).difference(shapely.box(5.2, 5.2, 5.8, 5.8))
+    g = LatLonGrid.build(Land([ring]), 1.0)
+    assert not g.water[g.cell(5.5, 5.5)] and not g.moves[g.cell(5.5, 5.5)].any()
