@@ -86,3 +86,26 @@ def test_fuel_search_in_still_weather_follows_the_shortest_route(graph):
     assert r.km == pytest.approx(shortest.km)
     assert r.cost == pytest.approx(c.calm_kg_per_km * r.km, rel=1e-4)
     assert r.cost == pytest.approx(c.path(r.lat, r.lon, r.on_link))
+
+
+def test_moving_weather_is_taken_when_the_ship_gets_there():
+    # Still at T0, a 20 m/s head wind (from the east) six hours later.
+    fc = forecast()
+    fc.fields["wind_u"][1] = -20.0
+    frozen, moving = cost(fc), FuelCost(KCS_SHIP, fc, T0, 16 * KNOT, WAVES, frozen=False)
+    leg = (0.0, 150.0, 0.0, 150.01)  # about 1 km: its midpoint is reached within a minute
+    assert moving.kg(*leg, hours=0.0) == pytest.approx(frozen.kg(*leg), rel=1e-3)
+    assert moving.kg(*leg, hours=6.0) > 1.1 * frozen.kg(*leg, hours=6.0)
+    # Beyond the forecast's end the last step holds.
+    assert moving.kg(*leg, hours=100.0) == pytest.approx(moving.kg(*leg, hours=6.0), rel=1e-3)
+    assert moving.beyond_forecast == 2 + 1  # setting out at 6 h, the midpoint is just past the end too
+
+
+def test_moving_search_in_steady_weather_matches_the_frozen_one(graph):
+    fc = forecast(wind_u=-10.0, Hs=2.0, wave_from_x=1.0, T_m10=8.0)
+    s, g = graph.nearest(0.5, 150.5), graph.nearest(5.5, 160.5)
+    frozen, moving = cost(fc), FuelCost(KCS_SHIP, fc, T0, 16 * KNOT, WAVES, frozen=False)
+    a = astar(graph, s, g, frozen.edge_costs(graph, chunk=10_000), frozen.link_cost, lambda n: 0.0)
+    b = astar(graph, s, g, moving.moving_costs(graph), moving.link_cost, lambda n: 0.0)
+    assert b.cost == pytest.approx(a.cost)
+    assert b.cost == pytest.approx(moving.path(b.lat, b.lon, b.on_link))

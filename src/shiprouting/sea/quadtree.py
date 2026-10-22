@@ -128,7 +128,8 @@ def astar(
     """Shortest path from node s to node g.
 
     By default a move costs its length. `edge_cost` gives another cost per edge, aligned with
-    graph.indices, `link_cost(link, km)` another cost for taking a link, and `heuristic(n)` a
+    graph.indices, or is a function `edge_cost(c, km)` giving the costs of node c's edges when
+    the path reaches c after km; `link_cost(link, km)` gives another cost for taking a link, and `heuristic(n)` a
     lower bound on the cost from n to g; the result's km is then the length of the path found,
     and cost what was minimised.
     """
@@ -139,7 +140,7 @@ def astar(
 
     h = heuristic or h
 
-    jumps = {}  # node -> [(node, km, link, reversed)]
+    jumps = {}  # node -> [(node, cost, km, link, reversed)]
     for a, b, link in graph.links:
         km = (
             float(haversine_km(graph.lat[a], graph.lon[a], link.lat[0], link.lon[0]))
@@ -147,11 +148,12 @@ def astar(
             + float(haversine_km(graph.lat[b], graph.lon[b], link.lat[-1], link.lon[-1]))
         )
         cost = km if link_cost is None else link_cost(link, km)
-        jumps.setdefault(a, []).append((b, cost, link, False))
-        jumps.setdefault(b, []).append((a, cost, link, True))
+        jumps.setdefault(a, []).append((b, cost, km, link, False))
+        jumps.setdefault(b, []).append((a, cost, km, link, True))
     edge_cost = graph.km if edge_cost is None else edge_cost
 
     best = {s: 0.0}
+    dist = {s: 0.0}  # km along the best path
     parent = {s: None}
     closed = set()
     open_list = [(h(s), s)]
@@ -167,11 +169,13 @@ def astar(
         if time.perf_counter() - t0 > max_seconds:
             raise TimeoutError(f"stopped after {max_seconds:g} s ({expanded} cells expanded)")
         lo, hi = graph.indptr[c], graph.indptr[c + 1]
-        steps = [(int(n), float(w), None, False) for n, w in zip(graph.indices[lo:hi], edge_cost[lo:hi])]
-        for n, w, link, rev in steps + jumps.get(c, []):
-            cost = best[c] + w
+        w = edge_cost(c, dist[c]) if callable(edge_cost) else edge_cost[lo:hi]
+        steps = [(int(n), float(wn), float(km), None, False) for n, wn, km in zip(graph.indices[lo:hi], w, graph.km[lo:hi])]
+        for n, wn, km, link, rev in steps + jumps.get(c, []):
+            cost = best[c] + wn
             if n not in closed and cost < best.get(n, math.inf):
                 best[n] = cost
+                dist[n] = dist[c] + km
                 parent[n] = (c, link, rev)
                 heapq.heappush(open_list, (cost + h(n), n))
     else:
