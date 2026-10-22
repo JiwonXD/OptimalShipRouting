@@ -15,6 +15,8 @@ from dataclasses import dataclass
 
 import numpy as np
 import shapely
+from scipy.sparse import coo_matrix
+from scipy.sparse.csgraph import connected_components
 
 from shiprouting.sea.land import Land
 from shiprouting.sea.latlon import CHECKPOINTS, ICE_FREE, ROUTES, SearchResult, haversine_km, segments_on_land
@@ -38,11 +40,16 @@ class Graph:
         x, y, s, lat, lon = x[water], y[water], s[water], lat[water], lon[water]
 
         i, j, km = edges(land, x, y, s, lat, lon)
-        connected = np.zeros(len(lat), bool)
-        connected[i] = connected[j] = True  # a cell with no open edge cannot be reached or left
-        new = np.cumsum(connected) - 1
-        i, j = new[i], new[j]
-        lat, lon, s = lat[connected], lon[connected], s[connected]
+        # Keep only bodies of water that hold at least one cell of root size: the split cells
+        # of a pocket behind a breakwater, or a cell with no open edge, lead nowhere.
+        n, label = connected_components(coo_matrix((km, (i, j)), shape=(len(lat), len(lat))), directed=False)
+        sea = np.zeros(n, bool)
+        sea[label[s >= root]] = True
+        keep = sea[label] & (np.bincount(np.concatenate([i, j]), minlength=len(lat)) > 0)
+        new = np.cumsum(keep) - 1
+        e = keep[i] & keep[j]
+        i, j, km = new[i[e]], new[j[e]], km[e]
+        lat, lon, s = lat[keep], lon[keep], s[keep]
 
         a, b = np.concatenate([i, j]), np.concatenate([j, i])
         order = np.argsort(a, kind="stable")

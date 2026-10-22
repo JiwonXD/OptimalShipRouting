@@ -44,3 +44,12 @@ def test_links_join_cells_near_their_ends(graph):
     g = Graph.build(WALL, root=1.0, min_step=1 / 16, lat_limits=(-40.0, 40.0), links=[canal])
     r = astar(g, g.nearest(-20.5, -5.5), g.nearest(-20.5, 7.5))
     assert r.links == ["운하"]
+
+
+def test_pockets_of_water_cut_off_from_the_open_sea_are_dropped():
+    # A lagoon inside a ring of land is split into small water cells that connect only to each other.
+    ring = shapely.box(0.1, 0.1, 0.9, 0.9).difference(shapely.box(0.3, 0.3, 0.7, 0.7))
+    g = Graph.build(Land([ring]), root=1.0, min_step=1 / 8, lat_limits=(-10.0, 10.0))
+    in_lagoon = (g.lat > 0.3) & (g.lat < 0.7) & (g.lon > 0.3) & (g.lon < 0.7)
+    assert not in_lagoon.any()
+    assert g.size.min() == 1 / 8  # the coast outside the ring is still split
