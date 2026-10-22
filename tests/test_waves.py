@@ -87,3 +87,15 @@ def test_table_matches_the_direct_integral():
     # Between grid points it interpolates, close to the integral.
     assert table(2.0, 6.6, 0.15) == pytest.approx(waves.added_resistance(KCS_SEAKEEPING, 2.0, 6.6, 0.15, speed), rel=0.02)
     assert table(0.0, 7.0, 0.0) == 0.0
+
+
+def test_a_cached_table_is_built_once(tmp_path, monkeypatch):
+    grid = {"T01": (7.0, 9.0), "angle": (0.0, math.pi)}
+    first = waves.AddedResistanceTable.cached(str(tmp_path), KCS_SEAKEEPING, 12 * KNOT, **grid)
+    assert len(list(tmp_path.iterdir())) == 1
+    monkeypatch.setattr(waves, "added_resistance", None)  # read back, not computed again
+    again = waves.AddedResistanceTable.cached(str(tmp_path), KCS_SEAKEEPING, 12 * 1852 / 3600, **grid)  # same speed, last digit apart
+    assert (again.per_Hs2 == first.per_Hs2).all() and (again.T01 == first.T01).all()
+    monkeypatch.undo()
+    waves.AddedResistanceTable.cached(str(tmp_path), KCS_SEAKEEPING, 14 * KNOT, **grid)
+    assert len(list(tmp_path.iterdir())) == 2
