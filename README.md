@@ -28,7 +28,21 @@
 
 KCS는 실제로 건조된 배가 아니어서 엔진과 일부 추진 계수는 가정값입니다. 각 값의 출처는 `src/shiprouting/fuel/ships.py`에 적어 두었습니다.
 
+기상 예보는 ECMWF 공개 예보(IFS 0.25°)를 씁니다. 바람(10 m), 유의파고, 평균 파향, 평균 파 주기, 표층 해류를 받아 위치와 시각에 맞게 보간하고, 배의 진행 방향 기준 해상 상태로 바꿔 연료 엔진에 넣습니다. 육지나 해빙이라 파랑 값이 없는 격자점은 빼고 보간합니다.
+
+```python
+from datetime import datetime
+from shiprouting.weather import ecmwf
+
+paths = ecmwf.download(datetime(2026, 10, 21, 18), steps=range(0, 49, 6), target_dir="data/weather/ecmwf")
+forecast = ecmwf.load(paths)
+```
+
 데이터 파일은 `data/`에 두며 깃에는 올리지 않습니다.
+
+## 데이터 출처
+
+- 기상 예보: This service is based on data and products of the European Centre for Medium-Range Weather Forecasts (ECMWF). Source: www.ecmwf.int. 라이선스: [CC BY 4.0](https://creativecommons.org/licenses/by/4.0/). ECMWF does not accept any liability whatsoever for any error or omission in the data, their availability, or for any loss or damage arising from their use. 이 프로젝트는 원자료를 시공간 보간하고 파 주기를 변환해서 씁니다.
 
 ## 개발 환경
 
@@ -37,6 +51,6 @@ Python 3.11 이상.
 ```bash
 python -m venv .venv
 source .venv/bin/activate
-pip install -e '.[dev]'
+pip install -e '.[dev,weather]'
 pytest
 ```
