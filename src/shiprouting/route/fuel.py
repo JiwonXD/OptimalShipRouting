@@ -117,9 +117,10 @@ class FuelCost:
 
     def path(self, lat, lon, on_link) -> float:
         """Fuel, kg, along a path, links at the calm-water rate."""
-        kg = self.kg(lat[:-1], lon[:-1], lat[1:], lon[1:])
-        kg[on_link] = haversine_km(lat[:-1], lon[:-1], lat[1:], lon[1:])[on_link] * self.calm_kg_per_km
-        return float(kg.sum())
+        sea = ~on_link
+        a, b = np.nonzero(sea)[0], np.nonzero(sea)[0] + 1
+        link_km = haversine_km(lat[:-1], lon[:-1], lat[1:], lon[1:])[on_link].sum()
+        return float(self.kg(lat[a], lon[a], lat[b], lon[b]).sum() + link_km * self.calm_kg_per_km)
 
 
 def run(graph: Graph, ship: Ship, forecast: Forecast, speed_kn: float, max_seconds: float) -> list[dict]:
@@ -136,14 +137,22 @@ def run(graph: Graph, ship: Ship, forecast: Forecast, speed_kn: float, max_secon
         f" (no wave data: {cost.no_waves}, beyond MCR: {cost.over_mcr})",
         flush=True,
     )
+    per_km = edge_kg / graph.km
+    print(
+        f"moves cheaper per km than calm water: {int((per_km < cost.calm_kg_per_km).sum())}"
+        f" (lowest {per_km.min() / cost.calm_kg_per_km:.3f} of calm)",
+        flush=True,
+    )
     rows = []
     for name, (start, goal) in ROUTES.items():
         s, g = graph.nearest(*start), graph.nearest(*goal)
         row = {"route": name, "speed_kn": speed_kn, "weather_time": str(departure)}
         shortest = astar(graph, s, g)
+        before = cost.no_waves
         row.update(
             shortest_km=round(shortest.km),
             shortest_fuel_t=round(cost.path(shortest.lat, shortest.lon, shortest.on_link) / 1000, 2),
+            shortest_no_waves=f"{cost.no_waves - before}/{int((~shortest.on_link).sum())}",
             shortest_calm_fuel_t=round(shortest.km * cost.calm_kg_per_km / 1000, 2),
             shortest_seconds=round(shortest.seconds, 1),
         )
@@ -161,6 +170,13 @@ def run(graph: Graph, ship: Ship, forecast: Forecast, speed_kn: float, max_secon
                 lat=np.round(r.lat, 4).tolist(),
                 lon=np.round(r.lon, 4).tolist(),
             )
+            before = cost.no_waves
+            cost.path(r.lat, r.lon, r.on_link)
+            row["fuel_no_waves"] = f"{cost.no_waves - before}/{int((~r.on_link).sum())}"
+            # Without the heuristic (Dijkstra) the result is optimal whatever the heuristic overestimates.
+            exact = astar(graph, s, g, edge_kg, cost.link_cost, lambda n: 0.0)
+            row.update(exact_fuel_t=round(exact.cost / 1000, 2), exact_km=round(exact.km), exact_expanded=exact.expanded,
+                       exact_seconds=round(exact.seconds, 1))
         print({k: v for k, v in row.items() if k not in ("lat", "lon")}, flush=True)
         rows.append(row)
     return rows
