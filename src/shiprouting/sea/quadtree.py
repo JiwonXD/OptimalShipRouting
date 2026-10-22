@@ -127,11 +127,13 @@ def astar(
 ) -> SearchResult:
     """Shortest path from node s to node g.
 
-    By default a move costs its length. `edge_cost` gives another cost per edge, aligned with
-    graph.indices, or is a function `edge_cost(c, km)` giving the costs of node c's edges when
-    the path reaches c after km; `link_cost(link, km)` gives another cost for taking a link, and `heuristic(n)` a
-    lower bound on the cost from n to g; the result's km is then the length of the path found,
-    and cost what was minimised.
+    The search keeps a clock along the best path to each node, by default the km sailed. By
+    default a move costs its length and adds it to the clock. `edge_cost` gives another cost per
+    edge, aligned with graph.indices, or is a function `edge_cost(c, clock)` giving the costs of
+    node c's edges and how far each moves the clock; `link_cost(link, km, clock)` gives the cost
+    and clock step of taking a link. `heuristic(n)` is a lower bound on the cost from n to g.
+    The result's km is the length of the path found, cost what was minimised, and clock the
+    clock at each point (on a link's own points, spread by distance).
     """
     t0 = time.perf_counter()
 
@@ -140,20 +142,20 @@ def astar(
 
     h = heuristic or h
 
-    jumps = {}  # node -> [(node, cost, km, link, reversed)]
+    jumps = {}  # node -> [(node, km, link, reversed)]
     for a, b, link in graph.links:
         km = (
             float(haversine_km(graph.lat[a], graph.lon[a], link.lat[0], link.lon[0]))
             + link.km
             + float(haversine_km(graph.lat[b], graph.lon[b], link.lat[-1], link.lon[-1]))
         )
-        cost = km if link_cost is None else link_cost(link, km)
-        jumps.setdefault(a, []).append((b, cost, km, link, False))
-        jumps.setdefault(b, []).append((a, cost, km, link, True))
+        jumps.setdefault(a, []).append((b, km, link, False))
+        jumps.setdefault(b, []).append((a, km, link, True))
     edge_cost = graph.km if edge_cost is None else edge_cost
+    link_cost = link_cost or (lambda link, km, clock: (km, km))
 
     best = {s: 0.0}
-    dist = {s: 0.0}  # km along the best path
+    clock = {s: 0.0}  # along the best path
     parent = {s: None}
     closed = set()
     open_list = [(h(s), s)]
@@ -169,13 +171,14 @@ def astar(
         if time.perf_counter() - t0 > max_seconds:
             raise TimeoutError(f"stopped after {max_seconds:g} s ({expanded} cells expanded)")
         lo, hi = graph.indptr[c], graph.indptr[c + 1]
-        w = edge_cost(c, dist[c]) if callable(edge_cost) else edge_cost[lo:hi]
-        steps = [(int(n), float(wn), float(km), None, False) for n, wn, km in zip(graph.indices[lo:hi], w, graph.km[lo:hi])]
-        for n, wn, km, link, rev in steps + jumps.get(c, []):
+        w, dt = edge_cost(c, clock[c]) if callable(edge_cost) else (edge_cost[lo:hi], graph.km[lo:hi])
+        moves = [(int(n), float(wn), float(tn), None, False) for n, wn, tn in zip(graph.indices[lo:hi], w, dt)]
+        moves += [(n, *link_cost(link, km, clock[c]), link, rev) for n, km, link, rev in jumps.get(c, [])]
+        for n, wn, tn, link, rev in moves:
             cost = best[c] + wn
             if n not in closed and cost < best.get(n, math.inf):
                 best[n] = cost
-                dist[n] = dist[c] + km
+                clock[n] = clock[c] + tn
                 parent[n] = (c, link, rev)
                 heapq.heappush(open_list, (cost + h(n), n))
     else:
@@ -186,21 +189,25 @@ def astar(
         c, link, rev = parent[nodes[-1]]
         via.append((link, rev))
         nodes.append(c)
-    lat, lon = [graph.lat[s]], [graph.lon[s]]
+    lat, lon, at = [graph.lat[s]], [graph.lon[s]], [clock[s]]
     on_link, used = [], []
     for n, (link, rev) in zip(reversed(nodes[:-1]), reversed(via)):
         if link is not None:
             pts_lat, pts_lon = (link.lat[::-1], link.lon[::-1]) if rev else (link.lat, link.lon)
+            hop = haversine_km(np.r_[lat[-1], pts_lat], np.r_[lon[-1], pts_lon], np.r_[pts_lat, graph.lat[n]], np.r_[pts_lon, graph.lon[n]])
+            share = np.cumsum(hop)[:-1] / hop.sum()
+            at += list(at[-1] + share * (clock[n] - at[-1]))
             lat += list(pts_lat)
             lon += list(pts_lon)
             on_link += [False] + [True] * (len(pts_lat) - 1)
             used.append(link.name)
         lat.append(graph.lat[n])
         lon.append(graph.lon[n])
+        at.append(clock[n])
         on_link.append(False)
     lat, lon = np.array(lat), np.array(lon)
-    km = best[g] if edge_cost is graph.km and link_cost is None else float(haversine_km(lat[:-1], lon[:-1], lat[1:], lon[1:]).sum())
-    return SearchResult(lat, lon, np.array(on_link, bool), used, km, expanded, time.perf_counter() - t0, best[g])
+    km = float(haversine_km(lat[:-1], lon[:-1], lat[1:], lon[1:]).sum())
+    return SearchResult(lat, lon, np.array(on_link, bool), used, km, expanded, time.perf_counter() - t0, best[g], np.array(at))
 
 
 def straighten(land: Land, r: SearchResult, clearance_km: float = 0.0) -> SearchResult:

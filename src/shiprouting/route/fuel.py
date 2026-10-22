@@ -120,18 +120,24 @@ class FuelCost:
             out[k : k + chunk] = self.kg(graph.lat[a], graph.lon[a], graph.lat[b], graph.lon[b])
         return out
 
-    def moving_costs(self, graph: Graph):
-        """edge_cost function for quadtree.astar: the fuel of node c's moves, setting out km into the voyage."""
+    def costs(self, graph: Graph):
+        """edge_cost function for quadtree.astar, its clock in hours since `time`: the fuel of node
+        c's moves and their hours. In frozen weather all moves are costed up front."""
+        edge_kg = self.edge_costs(graph) if self.frozen else None
+        per_hour = self.speed * 3.6  # km
 
-        def costs(c, km):
+        def costs(c, hours):
             lo, hi = graph.indptr[c], graph.indptr[c + 1]
+            if edge_kg is not None:
+                return edge_kg[lo:hi], graph.km[lo:hi] / per_hour
             n = graph.indices[lo:hi]
-            return self.kg(graph.lat[c], graph.lon[c], graph.lat[n], graph.lon[n], km / (self.speed * 3.6))
+            return self.kg(graph.lat[c], graph.lon[c], graph.lat[n], graph.lon[n], hours), graph.km[lo:hi] / per_hour
 
         return costs
 
-    def link_cost(self, link, km: float) -> float:
-        return km * self.calm_kg_per_km
+    def link_cost(self, link, km: float, hours: float) -> tuple[float, float]:
+        """link_cost for quadtree.astar: links at the calm-water rate."""
+        return km * self.calm_kg_per_km, km / (self.speed * 3.6)
 
     def path(self, lat, lon, on_link) -> float:
         """Fuel, kg, along a path, links at the calm-water rate."""
@@ -154,9 +160,9 @@ def run(graph: Graph, ship: Ship, forecast: Forecast, speed_kn: float, max_secon
     print(f"wave added resistance table built in {time.perf_counter() - t0:.0f} s", flush=True)
     frozen = FuelCost(ship, forecast, departure, speed_kn * KNOT, waves)
     moving = FuelCost(ship, forecast, departure, speed_kn * KNOT, waves, frozen=False)
-    edge_kg = frozen.edge_costs(graph)
+    frozen_costs = frozen.costs(graph)
     print(
-        f"fuel of {len(edge_kg)} moves computed in {frozen.seconds:.0f} s"
+        f"fuel of {len(graph.indices)} moves computed in {frozen.seconds:.0f} s"
         f" (no wave data: {frozen.no_waves}, beyond MCR: {frozen.over_mcr})",
         flush=True,
     )
@@ -165,9 +171,9 @@ def run(graph: Graph, ship: Ship, forecast: Forecast, speed_kn: float, max_secon
     for name, (start, goal) in ROUTES.items():
         s, g = graph.nearest(*start), graph.nearest(*goal)
         row = {"route": name, "speed_kn": speed_kn, "departure": str(departure), "forecast_hours": forecast_hours}
-        found = {"shortest": astar(graph, s, g), "frozen": astar(graph, s, g, edge_kg, frozen.link_cost, lambda n: 0.0)}
+        found = {"shortest": astar(graph, s, g), "frozen": astar(graph, s, g, frozen_costs, frozen.link_cost, lambda n: 0.0)}
         try:
-            found["moving"] = astar(graph, s, g, moving.moving_costs(graph), moving.link_cost, lambda n: 0.0, max_seconds)
+            found["moving"] = astar(graph, s, g, moving.costs(graph), moving.link_cost, lambda n: 0.0, max_seconds)
         except TimeoutError as e:
             row["moving_error"] = str(e)
         for key, r in found.items():

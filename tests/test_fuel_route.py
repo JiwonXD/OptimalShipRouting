@@ -81,7 +81,7 @@ def graph():
 def test_fuel_search_in_still_weather_follows_the_shortest_route(graph):
     s, g = graph.nearest(0.5, 150.5), graph.nearest(5.5, 160.5)
     c = cost(forecast())
-    r = astar(graph, s, g, c.edge_costs(graph, chunk=10_000), c.link_cost, lambda n: 0.0)
+    r = astar(graph, s, g, c.costs(graph), c.link_cost, lambda n: 0.0)
     shortest = astar(graph, s, g)
     assert r.km == pytest.approx(shortest.km)
     assert r.cost == pytest.approx(c.calm_kg_per_km * r.km, rel=1e-4)
@@ -105,8 +105,8 @@ def test_moving_search_in_steady_weather_matches_the_frozen_one(graph):
     fc = forecast(wind_u=-10.0, Hs=2.0, wave_from_x=1.0, T_m10=8.0)
     s, g = graph.nearest(0.5, 150.5), graph.nearest(5.5, 160.5)
     frozen, moving = cost(fc), FuelCost(KCS_SHIP, fc, T0, 16 * KNOT, WAVES, frozen=False)
-    a = astar(graph, s, g, frozen.edge_costs(graph, chunk=10_000), frozen.link_cost, lambda n: 0.0)
-    b = astar(graph, s, g, moving.moving_costs(graph), moving.link_cost, lambda n: 0.0)
+    a = astar(graph, s, g, frozen.costs(graph), frozen.link_cost, lambda n: 0.0)
+    b = astar(graph, s, g, moving.costs(graph), moving.link_cost, lambda n: 0.0)
     assert b.cost == pytest.approx(a.cost)
     assert b.cost == pytest.approx(moving.path(b.lat, b.lon, b.on_link))
 
