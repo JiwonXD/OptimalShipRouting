@@ -3,7 +3,7 @@
 The ship sails at one fixed speed through the water. A move costs the fuel
 burnt over it, from the sea state at the move's midpoint in the forecast at the
 departure time: the weather is frozen for the whole voyage, and currents are
-left out. Links (canals, straits) are taken at the calm-water rate. The A*
+left out. Wave added resistance comes from a table built once for the speed. Links (canals, straits) are taken at the calm-water rate. The A*
 heuristic is the calm-water fuel for the great-circle distance left.
 """
 
@@ -13,7 +13,9 @@ from dataclasses import dataclass, field
 
 import numpy as np
 
-from shiprouting.fuel.ship import CALM, SeaState, Ship
+from shiprouting.fuel.powering import brake_power
+from shiprouting.fuel.ship import SeaState, Ship
+from shiprouting.fuel.waves import AddedResistanceTable
 from shiprouting.sea.latlon import haversine_km
 from shiprouting.sea.quadtree import Graph, along
 from shiprouting.weather.conditions import sea_state, weather_at
@@ -34,10 +36,22 @@ class FuelCost:
     forecast: Forecast
     time: np.datetime64  # the weather used everywhere
     speed: float  # through the water, m/s
+    waves: AddedResistanceTable | None = field(default=None, repr=False)  # built on first use if not given
     evaluations: int = 0  # moves whose fuel was computed with the full sea state
     no_waves: int = 0  # of those, moves with no wave data at the midpoint (taken without waves)
     seconds: float = 0.0  # spent computing fuel
     _cache: dict = field(default_factory=dict, repr=False)
+
+    def fuel_rate(self, sea: SeaState) -> float:
+        """Like ``Ship.fuel_rate`` at our speed, kg/h, with wave added resistance from the table."""
+        if sea.waves and self.waves is None:
+            self.waves = AddedResistanceTable.build(self.ship.seakeeping, self.speed)
+        R = self.ship.total_resistance(self.speed, SeaState(sea.wind_speed, sea.wind_angle))
+        for w in sea.waves:
+            assert w.s == 1.0, "the table is for wind-sea spreading"
+            R += self.waves(w.Hs, w.T01, w.angle)
+        ship = self.ship
+        return ship.engine.fuel_rate(brake_power(R, self.speed, ship.factors, ship.propeller, ship.propeller_D))
 
     @property
     def calm_kg_per_km(self) -> float:
@@ -55,7 +69,7 @@ class FuelCost:
         except ValueError:
             self.no_waves += 1
             sea = SeaState(math.hypot(weather.wind_u, weather.wind_v), math.atan2(-weather.wind_u, -weather.wind_v) - heading)
-        kg = self.ship.fuel_rate(self.speed, sea) * km / (self.speed * 3.6)
+        kg = self.fuel_rate(sea) * km / (self.speed * 3.6)
         self.evaluations += 1
         self.seconds += time.perf_counter() - t0
         return kg
@@ -92,19 +106,22 @@ def run(graph: Graph, ship: Ship, forecast: Forecast, speed_kn: float, max_secon
     from shiprouting.sea.quadtree import astar
 
     departure = forecast.time[0]
+    t0 = time.perf_counter()
+    waves = AddedResistanceTable.build(ship.seakeeping, speed_kn * KNOT)
+    print(f"wave added resistance table built in {time.perf_counter() - t0:.0f} s", flush=True)
     rows = []
     for name, (start, goal) in ROUTES.items():
         s, g = graph.nearest(*start), graph.nearest(*goal)
         row = {"route": name, "speed_kn": speed_kn, "weather_time": str(departure)}
         shortest = astar(graph, s, g)
-        check = FuelCost(ship, forecast, departure, speed_kn * KNOT)
+        check = FuelCost(ship, forecast, departure, speed_kn * KNOT, waves)
         row.update(
             shortest_km=round(shortest.km),
             shortest_fuel_t=round(check.path(shortest.lat, shortest.lon, shortest.on_link) / 1000, 2),
             shortest_calm_fuel_t=round(shortest.km * check.calm_kg_per_km / 1000, 2),
             shortest_seconds=round(shortest.seconds, 1),
         )
-        cost = FuelCost(ship, forecast, departure, speed_kn * KNOT)
+        cost = FuelCost(ship, forecast, departure, speed_kn * KNOT, waves)
         try:
             r = astar(graph, s, g, cost.weight(graph), cost.heuristic(graph, g), max_seconds)
         except (ValueError, TimeoutError) as e:

@@ -4,7 +4,9 @@ import numpy as np
 import pytest
 import shapely
 
-from shiprouting.fuel.ships import KCS_SHIP
+from shiprouting.fuel.ship import SeaState, WaveSystem
+from shiprouting.fuel.ships import KCS_SEAKEEPING, KCS_SHIP
+from shiprouting.fuel.waves import AddedResistanceTable
 from shiprouting.route.fuel import KNOT, FuelCost, bearing
 from shiprouting.sea.land import Land
 from shiprouting.sea.latlon import haversine_km
@@ -22,8 +24,12 @@ def forecast(**values) -> Forecast:
     return Forecast(lat, lon, np.array([T0, T0 + np.timedelta64(6, "h")]), fields)
 
 
+# A coarse table: the full one takes about a minute to build.
+WAVES = AddedResistanceTable.build(KCS_SEAKEEPING, 16 * KNOT, T01=(7.0, 9.0), angle=(0.0, math.pi / 2, math.pi))
+
+
 def cost(fc) -> FuelCost:
-    return FuelCost(KCS_SHIP, fc, T0, 16 * KNOT)
+    return FuelCost(KCS_SHIP, fc, T0, 16 * KNOT, WAVES)
 
 
 def test_bearing():
@@ -45,6 +51,12 @@ def test_head_wind_and_waves_cost_more_than_following():
     east = c.between(10.0, 150.0, 10.0, 150.5)
     west = c.between(10.0, 150.5, 10.0, 150.0)
     assert east > west > 0
+
+
+def test_fuel_rate_matches_the_ship_model_on_a_table_point():
+    c = cost(forecast())
+    sea = SeaState(10.0, 0.3, (WaveSystem(Hs=3.0, T01=7.0, angle=math.pi / 2),))
+    assert c.fuel_rate(sea) == pytest.approx(KCS_SHIP.fuel_rate(16 * KNOT, sea))
 
 
 def test_missing_waves_fall_back_to_wind_only():

@@ -77,3 +77,13 @@ def test_stern_oblique_motion_part_interpolates_beam_and_following_values():
             w = (deg - 90) / 90
             R = waves._mean_wave_resistance(KCS_SEAKEEPING, omega, math.radians(deg), V, 1025.0)
             assert R == pytest.approx((1 - w) * beam + w * following)
+
+
+def test_table_matches_the_direct_integral():
+    speed = 16 * KNOT
+    table = waves.AddedResistanceTable.build(KCS_SEAKEEPING, speed, T01=(6.0, 7.0, 8.0), angle=(0.0, 0.1, 0.2, math.pi))
+    # On a grid point it is the integral itself, scaled by Hs².
+    assert table(3.0, 7.0, -0.1) == pytest.approx(waves.added_resistance(KCS_SEAKEEPING, 3.0, 7.0, 0.1, speed))
+    # Between grid points it interpolates, close to the integral.
+    assert table(2.0, 6.6, 0.15) == pytest.approx(waves.added_resistance(KCS_SEAKEEPING, 2.0, 6.6, 0.15, speed), rel=0.02)
+    assert table(0.0, 7.0, 0.0) == 0.0

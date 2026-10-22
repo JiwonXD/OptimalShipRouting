@@ -10,6 +10,7 @@ Wave angles are where the waves come from relative to the bow: 0 = head seas,
 π = following seas, either side.
 """
 
+import bisect
 import math
 from dataclasses import dataclass
 
@@ -178,3 +179,41 @@ def added_resistance(
         inner = sum(regular_wave_resistance(sk, w, alpha, speed, rho) * spectrum(w, Hs, T01) for w in omegas)
         R += wgt * inner
     return 2 * R * dw * da / total_weight
+
+
+@dataclass(frozen=True)
+class AddedResistanceTable:
+    """``added_resistance`` at one speed and spreading, tabulated per unit Hs².
+
+    The spectrum scales with Hs², so R_AW = Hs² · f(T01, |angle|) exactly; only
+    f is interpolated, bilinearly. T01 outside the table is clamped to its ends.
+    """
+
+    T01: tuple[float, ...]  # s, ascending
+    angle: tuple[float, ...]  # rad, ascending from 0 to π
+    per_Hs2: tuple[tuple[float, ...], ...]  # N/m², [T01][angle]
+
+    @classmethod
+    def build(cls, sk: Seakeeping, speed: float, s: float = 1.0, T01=None, angle=None) -> "AddedResistanceTable":
+        T01 = tuple(T01 or (1.0 + 0.5 * i for i in range(39)))  # 1 to 20 s
+        angle = tuple(angle or (math.radians(5 * j) for j in range(37)))  # 0 to 180°
+        return cls(T01, angle, tuple(tuple(added_resistance(sk, 1.0, t, a, speed, s) for a in angle) for t in T01))
+
+    def __call__(self, Hs: float, T01: float, wave_angle: float) -> float:
+        """Added resistance, N, like ``added_resistance`` at the table's speed and spreading."""
+        if Hs <= 0:
+            return 0.0
+        t = min(max(T01, self.T01[0]), self.T01[-1])
+        a = abs(math.remainder(wave_angle, 2 * math.pi))
+        i, wt = _cell(self.T01, t)
+        j, wa = _cell(self.angle, a)
+        f = self.per_Hs2
+        return Hs**2 * (
+            (1 - wt) * ((1 - wa) * f[i][j] + wa * f[i][j + 1]) + wt * ((1 - wa) * f[i + 1][j] + wa * f[i + 1][j + 1])
+        )
+
+
+def _cell(grid, x):
+    """Index of the grid interval holding ``x`` and the weight of its upper end."""
+    i = min(bisect.bisect_right(grid, x) - 1, len(grid) - 2)
+    return i, (x - grid[i]) / (grid[i + 1] - grid[i])
