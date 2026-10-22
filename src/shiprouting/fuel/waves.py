@@ -208,7 +208,8 @@ class AddedResistanceTable:
         and by this module's source, so editing the formulas rebuilds it."""
         with open(__file__, "rb") as f:
             source = f.read()
-        key = hashlib.sha256(repr((sk, speed, s, T01, angle)).encode() + source).hexdigest()[:16]
+        # Rounded: 12 * (1852 / 3600) and 12 * 1852 / 3600 differ in the last digit.
+        key = hashlib.sha256(repr((sk, round(speed, 6), s, T01, angle)).encode() + source).hexdigest()[:16]
         path = os.path.join(folder, f"added_resistance_{key}.npz")
         if os.path.exists(path):
             with np.load(path) as f:
