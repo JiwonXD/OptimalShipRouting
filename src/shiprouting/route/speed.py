@@ -13,11 +13,11 @@ faster. meet_eta bisects the price until the route arrives just within the given
 import dataclasses
 import math
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
 import numpy as np
 
-from shiprouting.route.fuel import KNOT, FuelCost
+from shiprouting.route.fuel import KNOT, FuelCost, fuel_kg, stacked_tables
 from shiprouting.sea.latlon import SearchResult, haversine_km
 from shiprouting.sea.quadtree import Graph, astar
 
@@ -26,13 +26,23 @@ from shiprouting.sea.quadtree import Graph, astar
 class SpeedChoice:
     costs: list[FuelCost]  # one per speed, slowest first, moving weather, same departure
     per_hour: float = 0.0  # the price of an hour, kg of fuel
+    _args: tuple | None = field(default=None, repr=False)  # for kernel.fuel_kg, all speeds
+
+    def kg(self, lat_a, lon_a, lat_b, lon_b, hours=0.0) -> np.ndarray:
+        """FuelCost.kg at every speed in one pass, shape (speeds, *moves)."""
+        if self._args is None:
+            self._args = stacked_tables(self.costs)
+        return fuel_kg(self.costs, self._args, lat_a, lon_a, lat_b, lon_b, hours)
 
     def edge_cost(self, graph: Graph):
         """edge_cost function for quadtree.astar, its clock in hours: fuel + per_hour × hours."""
-        per_speed = [c.costs(graph) for c in self.costs]
+        km_h = np.array([c.speed * 3.6 for c in self.costs])[:, None]
 
         def costs(c, hours):
-            kg, h = (np.array(v) for v in zip(*(f(c, hours) for f in per_speed)))  # (speeds, moves)
+            lo, hi = graph.indptr[c], graph.indptr[c + 1]
+            n = graph.indices[lo:hi]
+            kg = self.kg(graph.lat[c], graph.lon[c], graph.lat[n], graph.lon[n], hours)  # (speeds, moves)
+            h = graph.km[lo:hi] / km_h
             total = kg + self.per_hour * h
             pick = np.argmin(total, axis=0)
             moves = np.arange(kg.shape[1])
@@ -61,7 +71,6 @@ class SpeedChoice:
             kg += c.kg(r.lat[a], r.lon[a], r.lat[a + 1], r.lon[a + 1], r.clock[a]).sum()
         return float(kg)
 
-
     def fill_slack(self, r: SearchResult, eta_hours: float, rounds: int = 20) -> SearchResult:
         """Spend the time a found path leaves before eta_hours: step segments down to the next
         slower speed, those saving the most fuel per extra hour first. Each round re-costs the
@@ -73,10 +82,8 @@ class SpeedChoice:
 
         def evaluate(k):
             clock = np.r_[0.0, np.cumsum(seg_km / (speeds[k] * 3.6))]
-            kg = np.empty((len(speeds), len(seg_km)))  # every speed, setting out at the profile's times
-            for j, c in enumerate(self.costs):
-                kg[j] = seg_km * c.calm_kg_per_km
-                kg[j, sea] = c.kg(r.lat[sea], r.lon[sea], r.lat[sea + 1], r.lon[sea + 1], clock[sea])
+            kg = seg_km * np.array([c.calm_kg_per_km for c in self.costs])[:, None]  # every speed, setting out at the profile's times
+            kg[:, sea] = self.kg(r.lat[sea], r.lon[sea], r.lat[sea + 1], r.lon[sea + 1], clock[sea])
             return clock, kg, kg[k, seg].sum()
 
         k = np.argmin(np.abs(self.speeds_kn(r)[:, None] - speeds[None, :] / KNOT), axis=1)

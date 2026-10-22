@@ -1,3 +1,4 @@
+import dataclasses
 import math
 
 import numpy as np
@@ -57,3 +58,16 @@ def test_time_left_before_the_eta_is_spent_slowing_down():
     assert r.cost < r16.cost
     assert r.cost == pytest.approx(sc.path(r))
     assert set(np.round(sc.speeds_kn(r), 6)) == {14.0, 16.0}
+
+
+def test_all_speeds_in_one_pass_match_each_speed_alone():
+    fc = forecast(wind_u=-10.0, wind_v=3.0, Hs=2.0, wave_from_x=1.0, T_m10=8.0)
+    fc.fields["Hs"][1] = 4.0
+    sc = choice(fc, (12, 16, 20))
+    lat_a, lon_a, hours = np.array([0.5, 10.0, -5.0]), np.array([150.5, 160.0, 170.0]), np.array([0.0, 3.0, 9.0])
+    args = (lat_a, lon_a, lat_a + 0.5, lon_a + 0.5, hours)
+    together = sc.kg(*args)
+    assert together.shape == (3, 3)
+    for c, kg in zip(sc.costs, together):
+        assert kg == pytest.approx(dataclasses.replace(c, beyond_forecast=0).kg(*args))
+    assert [c.beyond_forecast for c in sc.costs] == [1, 1, 1]
