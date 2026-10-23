@@ -73,7 +73,7 @@ class Came:
     def cost(self, kn: float) -> FuelCost:
         if kn not in self._costs:
             speed = kn * KNOT
-            waves = (AddedResistanceTable.cached(self.tables, self.ship.seakeeping, speed) if self.tables
+            waves = (AddedResistanceTable.between(self.tables, self.ship.seakeeping, speed) if self.tables
                      else AddedResistanceTable.build(self.ship.seakeeping, speed))
             self._costs[kn] = FuelCost(self.ship, self.came, self.departure, speed, waves, frozen=False, currents=True)
         return self._costs[kn]

@@ -53,7 +53,7 @@ def effect(forecast: Forecast, ship, found: dict, departure, tables: str | None 
         clock = np.r_[0.0, np.cumsum(seg_h)][:-1]
         kg = np.zeros(len(kn))
         for v in np.unique(kn):
-            waves = (AddedResistanceTable.cached(tables, ship.seakeeping, v * KNOT) if tables
+            waves = (AddedResistanceTable.between(tables, ship.seakeeping, v * KNOT) if tables
                      else AddedResistanceTable.build(ship.seakeeping, v * KNOT))
             cost = FuelCost(ship, forecast, np.datetime64(departure, "s"), v * KNOT, waves, frozen=False)
             mine = kn == v

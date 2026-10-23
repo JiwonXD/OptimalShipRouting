@@ -57,7 +57,7 @@ def plan(graph: Graph, ship: Ship, forecast: Forecast, start, goal, departure, d
     def cost(kn, at=departure):
         if kn not in waves:
             if tables:
-                waves[kn] = AddedResistanceTable.cached(tables, ship.seakeeping, kn * KNOT)
+                waves[kn] = AddedResistanceTable.between(tables, ship.seakeeping, kn * KNOT)
             else:
                 waves[kn] = AddedResistanceTable.build(ship.seakeeping, kn * KNOT)
         return FuelCost(ship, forecast, at, kn * KNOT, waves[kn], frozen=False, currents=currents)

@@ -99,3 +99,15 @@ def test_a_cached_table_is_built_once(tmp_path, monkeypatch):
     monkeypatch.undo()
     waves.AddedResistanceTable.cached(str(tmp_path), KCS_SEAKEEPING, 14 * KNOT, **grid)
     assert len(list(tmp_path.iterdir())) == 2
+
+
+def test_a_speed_between_grid_speeds_blends_their_tables(tmp_path):
+    grid = {"T01": (7.0, 9.0), "angle": (0.0, math.pi)}
+    blended = waves.AddedResistanceTable.between(str(tmp_path), KCS_SEAKEEPING, 15.25 * KNOT, **grid)
+    assert len(list(tmp_path.iterdir())) == 2  # 15 and 15.5 kn, nothing at 15.25
+    below, above = (waves.AddedResistanceTable.cached(str(tmp_path), KCS_SEAKEEPING, kn * KNOT, **grid) for kn in (15.0, 15.5))
+    assert blended.per_Hs2 == pytest.approx((below.per_Hs2 + above.per_Hs2) / 2)
+    exact = waves.AddedResistanceTable.build(KCS_SEAKEEPING, 15.25 * KNOT, **grid)
+    assert blended.per_Hs2 == pytest.approx(exact.per_Hs2, rel=0.01)
+    on_grid = waves.AddedResistanceTable.between(str(tmp_path), KCS_SEAKEEPING, 15.5 * KNOT, **grid)
+    assert (on_grid.per_Hs2 == above.per_Hs2).all() and len(list(tmp_path.iterdir())) == 2
