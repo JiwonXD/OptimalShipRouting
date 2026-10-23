@@ -35,10 +35,14 @@ class Graph:
     links: tuple = ()  # (node at the first end, node at the last end, Link)
 
     @classmethod
-    def build(cls, land: Land, root: float = 0.25, min_step: float = 1 / 32, lat_limits=ICE_FREE, links=()) -> "Graph":
+    def build(cls, land: Land, root: float = 0.25, min_step: float = 1 / 32, lat_limits=ICE_FREE, links=(),
+              bathymetry=None, min_depth: float = 15.0) -> "Graph":
+        """Given the bathymetry, a cell whose centre is min_depth m deep or less is left out too."""
         x, y, s = split_coast(land, root, min_step, lat_limits)
         lon, lat = x + s / 2, y + s / 2
         water = ~land.contains(lat, lon)
+        if bathymetry is not None:
+            water &= -bathymetry.elevation(lat, lon) > min_depth
         x, y, s, lat, lon = x[water], y[water], s[water], lat[water], lon[water]
 
         i, j, km = edges(land, x, y, s, lat, lon)

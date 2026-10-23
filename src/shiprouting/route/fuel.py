@@ -209,7 +209,7 @@ def run(graph: Graph, ship: Ship, forecast: Forecast, speed_kn: float, max_secon
             }
         print(row, flush=True)
         for key, r in found.items():
-            row[key] |= {"lat": np.round(r.lat, 4).tolist(), "lon": np.round(r.lon, 4).tolist()}
+            row[key] |= {"lat": np.round(r.lat, 4).tolist(), "lon": np.round(r.lon, 4).tolist(), "on_link": r.on_link.tolist()}
         rows.append(row)
     return rows
 
@@ -231,6 +231,11 @@ def main() -> None:
     parser.add_argument("--links", help="folder with the Overpass canal and strait files (see links.LINKS)")
     parser.add_argument("--speed-kn", type=float, default=16.0)
     parser.add_argument("--max-seconds", type=float, default=600.0, help="give up a moving-weather search after this long")
+    parser.add_argument("--bathymetry", help="GEBCO grid, netCDF: keep out of water --min-depth m deep or less")
+    parser.add_argument("--min-depth", type=float, default=15.0)
+    parser.add_argument("--depth-check", choices=["centre", "lines"], default="lines",
+                        help="check only cell centres, or also every move and smoothed leg")
+    parser.add_argument("--link-approach-km", type=float, default=10.0, help="no depth check this close to a link's sea end")
     args = parser.parse_args()
 
     land = load_osm_land_polygons(args.land)
@@ -240,8 +245,16 @@ def main() -> None:
 
         links = load_links(args.links)
     t0 = time.perf_counter()
-    graph = Graph.build(land, min_step=args.min_step, links=links)
-    print(f"graph: {len(graph.lat)} cells, built in {time.perf_counter() - t0:.0f} s", flush=True)
+    bathymetry = None
+    if args.bathymetry:
+        from shiprouting.sea.depth import Bathymetry, LandOrShallow, link_ends
+
+        bathymetry = Bathymetry(args.bathymetry)
+        if args.depth_check == "lines":
+            land = LandOrShallow(land, bathymetry, args.min_depth, link_ends(), args.link_approach_km)
+            bathymetry = None
+    graph = Graph.build(land, min_step=args.min_step, links=links, bathymetry=bathymetry, min_depth=args.min_depth)
+    print(f"graph: {len(graph.lat)} cells, links {[k.name for *_, k in graph.links]}, built in {time.perf_counter() - t0:.0f} s", flush=True)
     forecast = ecmwf.load(sorted(glob.glob(args.forecast)))
     rows = run(graph, KCS_SHIP, forecast, args.speed_kn, args.max_seconds, land)
     with open(args.out, "w", encoding="utf-8") as f:
