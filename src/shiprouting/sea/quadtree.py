@@ -72,6 +72,37 @@ class Graph:
     def nearest(self, lat: float, lon: float) -> int:
         return int(np.argmin(haversine_km(self.lat, self.lon, lat, lon)))
 
+    def save(self, path: str, key: str = "") -> None:
+        """Keep the graph in an .npz file, with a key saying how it was built."""
+        k = [link for *_, link in self.links]
+        np.savez(
+            path, key=key, lat=self.lat, lon=self.lon, size=self.size, indptr=self.indptr, indices=self.indices, km=self.km,
+            link_ends=np.array([(a, b) for a, b, _ in self.links], int).reshape(-1, 2),
+            link_names=np.array([link.name for link in k], str), link_points=np.array([len(link.lat) for link in k], int),
+            link_lat=np.concatenate([link.lat for link in k] or [[]]), link_lon=np.concatenate([link.lon for link in k] or [[]]),
+        )  # fmt: skip
+
+    @classmethod
+    def cached(cls, path: str | None, key: str, build) -> "Graph":
+        """The graph kept at path if it was built with the same key, else build() kept there."""
+        import os
+
+        from shiprouting.sea.links import Link
+
+        if path and os.path.exists(path):
+            with np.load(path) as f:
+                if str(f["key"]) == key:
+                    cut = np.cumsum(f["link_points"])[:-1]
+                    links = tuple(
+                        (int(a), int(b), Link(str(name), lat, lon))
+                        for (a, b), name, lat, lon in zip(f["link_ends"], f["link_names"], np.split(f["link_lat"], cut), np.split(f["link_lon"], cut))
+                    )
+                    return cls(*(f[n] for n in ("lat", "lon", "size", "indptr", "indices", "km")), links)
+        graph = build()
+        if path:
+            graph.save(path, key)
+        return graph
+
 
 def split_coast(land: Land, root: float, min_step: float, lat_limits):
     """Corners (lon, lat) and sides of the cells: 0.25° boxes, with every box that is partly land split down to min_step."""
