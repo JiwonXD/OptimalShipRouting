@@ -56,12 +56,13 @@ def _abs_angle(a):
 
 @numba.njit(cache=True)
 def fuel_kg(
-    lat_a, lon_a, lat_b, lon_b, hours, out, counts,  # moves, the fuel out (speeds, moves), per speed (no waves, over MCR, after forecast)
+    lat_a, lon_a, lat_b, lon_b, hours, out, out_h, counts,  # moves, the fuel and hours out (speeds, moves), per speed (no waves, over MCR, after forecast)
     t0, frozen, speed, R_hull,  # departure s, weather frozen at t0?, per speed: m/s, calm-water resistance N
     wind_deg, C_DA, A_XV, rho_air,  # windage
     T01_grid, angle_grid, per_Hs2,  # AddedResistanceTable, per_Hs2 per speed
     R_grid, kg_h,  # per speed: fuel rate over total resistance, up to MCR
     lat_grid, lon_grid, t_grid, wind_u, wind_v, Hs_f, from_x, from_y, T_m10,  # forecast
+    current_u, current_v, currents,  # surface current, and whether to use it
 ):
     for m in range(len(lat_a)):
         p0, l0, p1, l1 = math.radians(lat_a[m]), math.radians(lon_a[m]), math.radians(lat_b[m]), math.radians(lon_b[m])
@@ -85,10 +86,26 @@ def fuel_kg(
                     counts[s, 2] += 1
                     t = t_grid[-1]
 
+            # Speed over the ground: the ship steers to stay on track, so the current across
+            # the track takes part of the speed through the water and the current along it adds.
+            sog = speed[s]
+            if currents:
+                cu = sample(current_u, lat_grid, lon_grid, t_grid, lat, lon, t)
+                cv = sample(current_v, lat_grid, lon_grid, t_grid, lat, lon, t)
+                if not (math.isnan(cu) or math.isnan(cv)):
+                    c_along = cu * math.sin(heading) + cv * math.cos(heading)
+                    c_across = cu * math.cos(heading) - cv * math.sin(heading)
+                    sog = math.sqrt(max(speed[s] ** 2 - c_across**2, 0.0)) + c_along
+            out_h[s, m] = km / (speed[s] * 3.6)
+            if sog < 0.25 * speed[s]:  # held back by the current: not a move to take
+                out[s, m] = math.inf
+                continue
+            out_h[s, m] = km / (sog * 3.6)
+
             u = sample(wind_u, lat_grid, lon_grid, t_grid, lat, lon, t)
             v = sample(wind_v, lat_grid, lon_grid, t_grid, lat, lon, t)
             wind, wind_angle = math.hypot(u, v), math.atan2(-u, -v) - heading
-            ax = -wind * math.cos(wind_angle) - speed[s]  # air velocity relative to the ship, ship axes
+            ax = -wind * math.cos(wind_angle) - sog  # air velocity relative to the ship, ship axes
             ay = -wind * math.sin(wind_angle)
             psi = math.degrees(_abs_angle(math.atan2(-ay, -ax)))
             R = R_hull[s] + 0.5 * rho_air * np.interp(psi, wind_deg, C_DA) * A_XV * (ax * ax + ay * ay)
@@ -113,4 +130,4 @@ def fuel_kg(
                 counts[s, 1] += 1
                 out[s, m] = math.inf
             else:
-                out[s, m] = np.interp(R, R_grid[s], kg_h[s]) * km / (speed[s] * 3.6)
+                out[s, m] = np.interp(R, R_grid[s], kg_h[s]) * out_h[s, m]

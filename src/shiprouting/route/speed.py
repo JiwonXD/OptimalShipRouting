@@ -28,21 +28,23 @@ class SpeedChoice:
     per_hour: float = 0.0  # the price of an hour, kg of fuel
     _args: tuple | None = field(default=None, repr=False)  # for kernel.fuel_kg, all speeds
 
-    def kg(self, lat_a, lon_a, lat_b, lon_b, hours=0.0) -> np.ndarray:
-        """FuelCost.kg at every speed in one pass, shape (speeds, *moves)."""
+    def kg_hours(self, lat_a, lon_a, lat_b, lon_b, hours=0.0) -> tuple[np.ndarray, np.ndarray]:
+        """FuelCost.kg_hours at every speed in one pass, each shape (speeds, *moves)."""
         if self._args is None:
             self._args = stacked_tables(self.costs)
         return fuel_kg(self.costs, self._args, lat_a, lon_a, lat_b, lon_b, hours)
 
+    def kg(self, lat_a, lon_a, lat_b, lon_b, hours=0.0) -> np.ndarray:
+        """FuelCost.kg at every speed in one pass, shape (speeds, *moves)."""
+        return self.kg_hours(lat_a, lon_a, lat_b, lon_b, hours)[0]
+
     def edge_cost(self, graph: Graph):
         """edge_cost function for quadtree.astar, its clock in hours: fuel + per_hour × hours."""
-        km_h = np.array([c.speed * 3.6 for c in self.costs])[:, None]
 
         def costs(c, hours):
             lo, hi = graph.indptr[c], graph.indptr[c + 1]
             n = graph.indices[lo:hi]
-            kg = self.kg(graph.lat[c], graph.lon[c], graph.lat[n], graph.lon[n], hours)  # (speeds, moves)
-            h = graph.km[lo:hi] / km_h
+            kg, h = self.kg_hours(graph.lat[c], graph.lon[c], graph.lat[n], graph.lon[n], hours)  # (speeds, moves)
             total = kg + self.per_hour * h
             pick = np.argmin(total, axis=0)
             moves = np.arange(kg.shape[1])
@@ -54,64 +56,80 @@ class SpeedChoice:
         kg, h = min((c.link_cost(link, km, hours) for c in self.costs), key=lambda kg_h: kg_h[0] + self.per_hour * kg_h[1])
         return kg + self.per_hour * h, h
 
-    def speeds_kn(self, r: SearchResult) -> np.ndarray:
-        """The speed of each segment of a path found with edge_cost, knots."""
+    def segments(self, r: SearchResult, clock) -> tuple[np.ndarray, np.ndarray]:
+        """Fuel, kg, and hours of each segment of r at every speed, setting out at clock (per
+        segment); shape (speeds, segments). Links at the calm-water rate."""
         seg_km = haversine_km(r.lat[:-1], r.lon[:-1], r.lat[1:], r.lon[1:])
-        return seg_km / np.diff(r.clock) / 1.852
+        kg = seg_km * np.array([c.calm_kg_per_km for c in self.costs])[:, None]
+        h = seg_km / np.array([c.speed * 3.6 for c in self.costs])[:, None]
+        a = np.nonzero(~r.on_link)[0]
+        kg[:, a], h[:, a] = self.kg_hours(r.lat[a], r.lon[a], r.lat[a + 1], r.lon[a + 1], np.asarray(clock)[a])
+        return kg, h
+
+    def speed_index(self, r: SearchResult) -> np.ndarray:
+        """Per segment, the slowest speed that sails it in no more hours than r's clock gives it:
+        on a path found with edge_cost, the speed taken."""
+        _, h = self.segments(r, r.clock[:-1])
+        return np.minimum((h > np.diff(r.clock) * (1 + 1e-9) + 1e-12).sum(axis=0), len(self.costs) - 1)
+
+    def speeds_kn(self, r: SearchResult) -> np.ndarray:
+        """The speed through the water of each segment of a path found with edge_cost, knots."""
+        return np.array([c.speed for c in self.costs])[self.speed_index(r)] / KNOT
 
     def path(self, r: SearchResult) -> float:
         """Fuel, kg, along a path found with edge_cost, each segment at its own speed and time."""
-        kn = self.speeds_kn(r)
-        seg_km = haversine_km(r.lat[:-1], r.lon[:-1], r.lat[1:], r.lon[1:])
-        kg = 0.0
-        for c in self.costs:
-            mine = np.isclose(kn, c.speed / KNOT, rtol=1e-6)
-            kg += seg_km[mine & r.on_link].sum() * c.calm_kg_per_km
-            a = np.nonzero(mine & ~r.on_link)[0]
-            kg += c.kg(r.lat[a], r.lon[a], r.lat[a + 1], r.lon[a + 1], r.clock[a]).sum()
-        return float(kg)
+        kg, _ = self.segments(r, r.clock[:-1])
+        return float(kg[self.speed_index(r), np.arange(kg.shape[1])].sum())
+
+    def sail(self, r: SearchResult, k) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+        """Sail r's segments one after another at the speeds of index k, from r's first clock: the
+        clock at each point, and the fuel and hours of each segment at every speed, setting out then."""
+        if not any(c.currents for c in self.costs):  # the hours do not depend on the weather
+            seg_km = haversine_km(r.lat[:-1], r.lon[:-1], r.lat[1:], r.lon[1:])
+            clock = r.clock[0] + np.r_[0.0, np.cumsum(seg_km / (np.array([c.speed for c in self.costs])[k] * 3.6))]
+            return clock, *self.segments(r, clock[:-1])
+        n = len(r.lat) - 1
+        clock, kg, h = np.empty(n + 1), np.empty((len(self.costs), n)), np.empty((len(self.costs), n))
+        clock[0] = r.clock[0]
+        for i in range(n):
+            one = dataclasses.replace(r, lat=r.lat[i : i + 2], lon=r.lon[i : i + 2], on_link=r.on_link[i : i + 1])
+            kg[:, i : i + 1], h[:, i : i + 1] = self.segments(one, clock[i : i + 1])
+            clock[i + 1] = clock[i] + h[k[i], i]
+        return clock, kg, h
 
     def snap_up(self, r: SearchResult) -> SearchResult:
-        """Each segment at the slowest offered speed no slower than its own, so the path arrives no
-        later: a path smoothed after the search has segments whose speeds are not on offer."""
-        speeds = np.array([c.speed for c in self.costs]) / KNOT
-        with np.errstate(divide="ignore"):
-            k = np.minimum(np.searchsorted(speeds, self.speeds_kn(r) * (1 - 1e-9)), len(speeds) - 1)
-        seg_km = haversine_km(r.lat[:-1], r.lon[:-1], r.lat[1:], r.lon[1:])
-        return dataclasses.replace(r, clock=r.clock[0] + np.r_[0.0, np.cumsum(seg_km / (speeds[k] * 1.852))])
+        """Each segment at the slowest offered speed that takes no longer than it did, so the path
+        arrives no later: a path smoothed after the search has segments sailed at no offered speed."""
+        return dataclasses.replace(r, clock=self.sail(r, self.speed_index(r))[0])
 
     def fill_slack(self, r: SearchResult, eta_hours: float, rounds: int = 20) -> SearchResult:
         """Spend the time a found path leaves before eta_hours: step segments down to the next
-        slower speed, those saving the most fuel per extra hour first. Each round re-costs the
-        whole path at its new times and stops when that no longer saves fuel."""
-        speeds = np.array([c.speed for c in self.costs])  # m/s
-        seg_km = haversine_km(r.lat[:-1], r.lon[:-1], r.lat[1:], r.lon[1:])
-        seg = np.arange(len(seg_km))
-        sea = np.nonzero(~r.on_link)[0]
-
-        def evaluate(k):
-            clock = np.r_[0.0, np.cumsum(seg_km / (speeds[k] * 3.6))]
-            kg = seg_km * np.array([c.calm_kg_per_km for c in self.costs])[:, None]  # every speed, setting out at the profile's times
-            kg[:, sea] = self.kg(r.lat[sea], r.lon[sea], r.lat[sea + 1], r.lon[sea + 1], clock[sea])
-            return clock, kg, kg[k, seg].sum()
-
-        k = np.argmin(np.abs(self.speeds_kn(r)[:, None] - speeds[None, :] / KNOT), axis=1)
-        clock, kg, fuel = evaluate(k)
+        slower speed, those saving the most fuel per extra hour first. Each round re-sails the
+        whole path at its new times. With the current, slowing down shifts the later segments in
+        time, so they may take longer than foreseen: if the path then arrives late or saves no
+        fuel, the round is tried again with half as many segments, down to none."""
+        seg = np.arange(len(r.lat) - 1)
+        k = self.speed_index(r)
+        clock, kg, h = self.sail(r, k)
+        fuel = kg[k, seg].sum()
         for _ in range(rounds):
             slower = np.maximum(k - 1, 0)
-            extra = seg_km / (speeds[slower] * 3.6) - seg_km / (speeds[k] * 3.6)
+            extra = h[slower, seg] - h[k, seg]
             saving = kg[k, seg] - kg[slower, seg]
-            worth = np.nonzero((k > 0) & (saving > 0))[0]
+            worth = np.nonzero((k > 0) & (saving > 0) & (extra > 0))[0]
             worth = worth[np.argsort(-saving[worth] / extra[worth])]
-            take = worth[np.cumsum(extra[worth]) <= eta_hours - clock[-1]]
+            take = worth[np.cumsum(extra[worth]) <= eta_hours - (clock[-1] - clock[0])]
+            while len(take):
+                k2 = k.copy()
+                k2[take] -= 1
+                clock2, kg2, h2 = self.sail(r, k2)
+                fuel2 = kg2[k2, seg].sum()
+                if fuel2 < fuel and clock2[-1] - clock2[0] <= eta_hours * (1 + 1e-9):
+                    break
+                take = take[: len(take) // 2]
             if len(take) == 0:
                 break
-            k2 = k.copy()
-            k2[take] -= 1
-            clock2, kg2, fuel2 = evaluate(k2)
-            if fuel2 >= fuel:
-                break
-            k, clock, kg, fuel = k2, clock2, kg2, fuel2
+            k, clock, kg, h, fuel = k2, clock2, kg2, h2, fuel2
         return dataclasses.replace(r, clock=clock, cost=float(fuel))
 
 

@@ -125,3 +125,30 @@ def test_kernel_sample_matches_the_forecast():
         expected = fc.sample("Hs", lat, lon, t)
         got = sample(field, fc.lat, fc.lon, seconds, lat, lon, float(t.astype(np.float64)))
         assert got == pytest.approx(float(expected), nan_ok=True)
+
+
+def test_a_current_along_the_track_shortens_the_hours_and_the_fuel_with_them():
+    c = 2 * KNOT  # m/s
+    leg = (0.0, 150.0, 0.0, 151.0)  # due east
+    still = FuelCost(KCS_SHIP, forecast(), T0, 16 * KNOT, WAVES, frozen=False, currents=True)
+    kg, h = still.kg_hours(*leg)
+    assert h == pytest.approx(haversine_km(*leg) / (16 * 1.852))
+    ahead = FuelCost(KCS_SHIP, forecast(current_u=c), T0, 16 * KNOT, WAVES, frozen=False, currents=True)
+    kg2, h2 = ahead.kg_hours(*leg)
+    assert h2 == pytest.approx(h * 16 / 18)
+    # The same rate for fewer hours, but the ship meets the still air at 18 kn: a little more air resistance.
+    assert kg * 16 / 18 < kg2 < kg * 16 / 18 * 1.02
+    across = FuelCost(KCS_SHIP, forecast(current_v=c), T0, 16 * KNOT, WAVES, frozen=False, currents=True)
+    assert across.kg_hours(*leg)[1] == pytest.approx(h * 16 / math.sqrt(16**2 - 4))
+    ignored = FuelCost(KCS_SHIP, forecast(current_u=c), T0, 16 * KNOT, WAVES, frozen=False)
+    assert ignored.kg_hours(*leg) == pytest.approx((kg, h))
+
+
+def test_a_path_sailed_with_the_current_keeps_its_clock(graph):
+    fc = forecast(current_u=-1.0, Hs=1.0, wave_from_x=1.0, T_m10=8.0)
+    c = FuelCost(KCS_SHIP, fc, T0, 16 * KNOT, WAVES, frozen=False, currents=True)
+    r = astar(graph, graph.nearest(0.5, 150.5), graph.nearest(5.5, 160.5), c.costs(graph), c.link_cost, lambda n: 0.0)
+    kg, clock = c.sail(r.lat, r.lon, r.on_link)
+    assert kg == pytest.approx(r.cost)
+    assert clock == pytest.approx(r.clock)
+    assert clock[-1] > r.km / (16 * 1.852)  # against the current

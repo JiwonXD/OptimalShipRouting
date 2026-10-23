@@ -13,6 +13,10 @@ either gives each leg a share of the time in proportion to its shortest distance
 for the voyage as a whole (legs="shared"). Given the land, both routes then have their
 sharp turns smoothed out (quadtree.smooth_turns), waypoints kept, and the least-fuel
 route is re-timed to the speeds on offer and spends the time that saves.
+
+With currents, the surface current changes each move's speed over the ground (FuelCost),
+so the shortest route's one speed through the water is adjusted until it arrives at the
+deadline.
 """
 
 import math
@@ -33,7 +37,7 @@ SPEEDS_KN = (12, 14, 16, 18, 20, 22, 24)
 
 def plan(graph: Graph, ship: Ship, forecast: Forecast, start, goal, departure, deadline, speeds_kn=SPEEDS_KN,
          tables: str | None = None, max_tries: int = 12, max_seconds: float = math.inf, via=(), legs: str = "distance",
-         land=None) -> dict:
+         land=None, currents: bool = True) -> dict:
     departure, deadline = np.datetime64(departure, "s"), np.datetime64(deadline, "s")
     if not forecast.time[0] <= departure < forecast.time[-1]:
         raise ValueError(f"departure {departure} is outside the forecast")
@@ -41,7 +45,7 @@ def plan(graph: Graph, ship: Ship, forecast: Forecast, start, goal, departure, d
     points = [start, *via, goal]
     nodes = [graph.nearest(*p) for p in points]
     out = {
-        "start": list(start), "goal": list(goal), "via": [list(p) for p in via], "legs_time": legs,
+        "start": list(start), "goal": list(goal), "via": [list(p) for p in via], "legs_time": legs, "currents": currents,
         "departure": str(departure), "deadline": str(deadline), "hours": hours,
         "moved_km": [round(float(haversine_km(graph.lat[n], graph.lon[n], *p)), 1) for n, p in zip(nodes, points)],
     }
@@ -54,7 +58,7 @@ def plan(graph: Graph, ship: Ship, forecast: Forecast, start, goal, departure, d
                 waves[kn] = AddedResistanceTable.cached(tables, ship.seakeeping, kn * KNOT)
             else:
                 waves[kn] = AddedResistanceTable.build(ship.seakeeping, kn * KNOT)
-        return FuelCost(ship, forecast, at, kn * KNOT, waves[kn], frozen=False)
+        return FuelCost(ship, forecast, at, kn * KNOT, waves[kn], frozen=False, currents=currents)
 
     def waypoints(r):
         """Indices of the waypoints in path r."""
@@ -75,7 +79,15 @@ def plan(graph: Graph, ship: Ship, forecast: Forecast, start, goal, departure, d
         out["error"] = f"the deadline cannot be met: the shortest route ({r.km:.0f} km) needs {need_kn:.1f} kn"
         return out
     kn = max(need_kn, min(speeds_kn))
-    out["shortest"] = describe(r, cost(kn).path(r.lat, r.lon, r.on_link), np.full(len(r.lat) - 1, kn), time.perf_counter() - t0)
+    for _ in range(6):  # the current makes it arrive early or late: adjust the speed to arrive just before the deadline
+        fuel, clock = cost(kn).sail(r.lat, r.lon, r.on_link)
+        if hours * (1 - 0.002) <= clock[-1] <= hours or (kn == min(speeds_kn) and clock[-1] < hours):
+            break
+        kn = max(round(kn * clock[-1] / (hours * (1 - 0.001)), 2), min(speeds_kn))
+    if kn > max(speeds_kn):
+        out["error"] = f"the deadline cannot be met: the shortest route ({r.km:.0f} km) needs {kn:.1f} kn with the current"
+        return out
+    out["shortest"] = describe(r, fuel, np.full(len(r.lat) - 1, kn), float(clock[-1]), time.perf_counter() - t0)
 
     t0 = time.perf_counter()
     # The shortest route's own speed is offered too, so sailing it as it does is among the choices.
@@ -100,7 +112,7 @@ def plan(graph: Graph, ship: Ship, forecast: Forecast, start, goal, departure, d
         return out
     if land is not None:
         f = choice.fill_slack(choice.snap_up(smoothed(f)), hours)
-    out["least_fuel"] = describe(f, f.cost, choice.speeds_kn(f), time.perf_counter() - t0)
+    out["least_fuel"] = describe(f, f.cost, choice.speeds_kn(f), float(f.clock[-1] - f.clock[0]), time.perf_counter() - t0)
     ends = [0, *waypoints(f), len(f.lat) - 1]
     seg_km = np.r_[0.0, np.cumsum(haversine_km(f.lat[:-1], f.lon[:-1], f.lat[1:], f.lon[1:]))]
     out["least_fuel"]["legs"] = [{"km": round(float(seg_km[b] - seg_km[a]), 1), "hours": round(float(f.clock[b] - f.clock[a]), 1)}
@@ -111,11 +123,10 @@ def plan(graph: Graph, ship: Ship, forecast: Forecast, start, goal, departure, d
     return out
 
 
-def describe(r: SearchResult, fuel_kg: float, speeds_kn, seconds: float) -> dict:
-    seg_km = haversine_km(r.lat[:-1], r.lon[:-1], r.lat[1:], r.lon[1:])
+def describe(r: SearchResult, fuel_kg: float, speeds_kn, hours: float, seconds: float) -> dict:
     return {
         "km": round(r.km, 1),
-        "hours": round(float((seg_km / (np.asarray(speeds_kn) * 1.852)).sum()), 1),
+        "hours": round(hours, 1),
         "fuel_t": round(fuel_kg / 1000, 2),
         "speeds_kn": {f"{v:g}": int(n) for v, n in zip(*np.unique(np.round(speeds_kn, 2), return_counts=True))},
         "links": r.links,
@@ -158,6 +169,7 @@ def main() -> None:
     parser.add_argument("--legs", choices=["distance", "shared"], default="distance",
                         help="time per leg: in proportion to distance, or one price of an hour for the whole voyage")
     parser.add_argument("--no-smoothing", action="store_true", help="leave sharp turns as found")
+    parser.add_argument("--no-currents", action="store_true", help="leave the surface current out")
     args = parser.parse_args()
 
     land = load_osm_land_polygons(args.land)
@@ -178,7 +190,7 @@ def main() -> None:
     start, goal, *via = [tuple(float(v) for v in p.split(",")) for p in (args.start, args.goal, *args.via)]
     speeds = [float(v) for v in args.speeds_kn.split(",")]
     out = plan(graph, KCS_SHIP, forecast, start, goal, args.departure, args.deadline, speeds, args.tables, args.max_tries,
-               args.max_seconds, via, args.legs, None if args.no_smoothing else land)
+               args.max_seconds, via, args.legs, None if args.no_smoothing else land, not args.no_currents)
     print({k: ({kk: vv for kk, vv in v.items() if kk not in ("lat", "lon", "on_link", "segment_kn", "clock")} if isinstance(v, dict) else v)
            for k, v in out.items() if k != "tries"}, flush=True)
     with open(args.out, "w", encoding="utf-8") as f:

@@ -1,8 +1,10 @@
 """Fuel-optimal routing: a shortest-path search on the sea graph with fuel as the cost.
 
 The ship sails at one fixed speed through the water. A move costs the fuel
-burnt over it, from the sea state at the move's midpoint, and currents are left
-out. The weather is either frozen at the departure time for the whole voyage,
+burnt over it, from the sea state at the move's midpoint. Given currents, the
+ship steers to stay on its track and the surface current at the midpoint
+changes its speed over the ground, and so the move's hours and fuel; otherwise
+currents are left out. The weather is either frozen at the departure time for the whole voyage,
 or taken at the time the ship reaches the move's midpoint (moving weather),
 held at the forecast's last step beyond its end. Links (canals, straits) are taken at the calm-water rate. The search
 has no heuristic (Dijkstra): a following wind makes some moves cheaper than
@@ -48,6 +50,7 @@ class FuelCost:
     speed: float  # through the water, m/s
     waves: AddedResistanceTable | None = field(default=None, repr=False)  # built on first use if not given
     frozen: bool = True  # weather at `time` everywhere; else at the time the ship gets there
+    currents: bool = False  # take the surface current into account
     no_waves: int = 0  # moves with no wave data at the midpoint (taken without waves)
     over_mcr: int = 0  # moves that need more than the engine's MCR at this speed (fuel: inf)
     beyond_forecast: int = 0  # moves reached after the forecast's end (weather of its last step)
@@ -90,6 +93,7 @@ class FuelCost:
                 R_grid[None], kg_h[None],
                 fc.lat, fc.lon, seconds,
                 *(fc.fields[n] for n in ("wind_u", "wind_v", "Hs", "wave_from_x", "wave_from_y", "T_m10")),
+                *((fc.fields["current_u"], fc.fields["current_v"]) if self.currents else (NO_CURRENT, NO_CURRENT)), self.currents,
             )  # fmt: skip
         return self._args
 
@@ -99,29 +103,33 @@ class FuelCost:
         The sea state is that of weather_at and sea_state. Moves that need more than the
         engine's MCR cost inf.
         """
-        return fuel_kg([self], self._tables(), lat_a, lon_a, lat_b, lon_b, hours)[0]
+        return self.kg_hours(lat_a, lon_a, lat_b, lon_b, hours)[0]
 
-    def edge_costs(self, graph: Graph, chunk: int = 1_000_000) -> np.ndarray:
-        """Fuel, kg, of every move of the graph, aligned with graph.indices, for quadtree.astar."""
+    def kg_hours(self, lat_a, lon_a, lat_b, lon_b, hours=0.0):
+        """Fuel, kg, and hours of each move (kg as in kg)."""
+        kg, h = fuel_kg([self], self._tables(), lat_a, lon_a, lat_b, lon_b, hours)
+        return kg[0], h[0]
+
+    def edge_costs(self, graph: Graph, chunk: int = 1_000_000) -> tuple[np.ndarray, np.ndarray]:
+        """Fuel, kg, and hours of every move of the graph, aligned with graph.indices, for quadtree.astar."""
         start = np.repeat(np.arange(len(graph.lat)), np.diff(graph.indptr))
-        out = np.empty(len(graph.indices))
-        for k in range(0, len(out), chunk):
+        kg, h = np.empty(len(graph.indices)), np.empty(len(graph.indices))
+        for k in range(0, len(kg), chunk):
             a, b = start[k : k + chunk], graph.indices[k : k + chunk]
-            out[k : k + chunk] = self.kg(graph.lat[a], graph.lon[a], graph.lat[b], graph.lon[b])
-        return out
+            kg[k : k + chunk], h[k : k + chunk] = self.kg_hours(graph.lat[a], graph.lon[a], graph.lat[b], graph.lon[b])
+        return kg, h
 
     def costs(self, graph: Graph):
         """edge_cost function for quadtree.astar, its clock in hours since `time`: the fuel of node
         c's moves and their hours. In frozen weather all moves are costed up front."""
-        edge_kg = self.edge_costs(graph) if self.frozen else None
-        per_hour = self.speed * 3.6  # km
+        edge_kg, edge_h = self.edge_costs(graph) if self.frozen else (None, None)
 
         def costs(c, hours):
             lo, hi = graph.indptr[c], graph.indptr[c + 1]
             if edge_kg is not None:
-                return edge_kg[lo:hi], graph.km[lo:hi] / per_hour
+                return edge_kg[lo:hi], edge_h[lo:hi]
             n = graph.indices[lo:hi]
-            return self.kg(graph.lat[c], graph.lon[c], graph.lat[n], graph.lon[n], hours), graph.km[lo:hi] / per_hour
+            return self.kg_hours(graph.lat[c], graph.lon[c], graph.lat[n], graph.lon[n], hours)
 
         return costs
 
@@ -131,13 +139,28 @@ class FuelCost:
 
     def path(self, lat, lon, on_link) -> float:
         """Fuel, kg, along a path, links at the calm-water rate."""
+        return self.sail(lat, lon, on_link)[0]
+
+    def sail(self, lat, lon, on_link) -> tuple[float, np.ndarray]:
+        """Fuel, kg, along a path, and the clock, hours, at each point; links at the calm-water rate."""
         seg_km = haversine_km(lat[:-1], lon[:-1], lat[1:], lon[1:])
-        hours = (np.cumsum(seg_km) - seg_km) / (self.speed * 3.6)  # setting out on each segment
-        a = np.nonzero(~on_link)[0]
-        kg = self.kg(lat[a], lon[a], lat[a + 1], lon[a + 1], hours[a])
-        return float(kg.sum() + seg_km[on_link].sum() * self.calm_kg_per_km)
+        if not self.currents:  # the hours do not depend on the weather: all segments at once
+            clock = np.r_[0.0, np.cumsum(seg_km)] / (self.speed * 3.6)
+            a = np.nonzero(~on_link)[0]
+            kg = self.kg(lat[a], lon[a], lat[a + 1], lon[a + 1], clock[a])
+            return float(kg.sum() + seg_km[on_link].sum() * self.calm_kg_per_km), clock
+        clock, kg = np.zeros(len(lat)), 0.0
+        for k in range(len(seg_km)):
+            if on_link[k]:
+                kg_k, h_k = seg_km[k] * self.calm_kg_per_km, seg_km[k] / (self.speed * 3.6)
+            else:
+                kg_k, h_k = self.kg_hours(lat[k], lon[k], lat[k + 1], lon[k + 1], clock[k])
+            kg += float(kg_k)
+            clock[k + 1] = clock[k] + float(h_k)
+        return kg, clock
 
 
+NO_CURRENT = np.zeros((2, 2, 2))  # in place of the current fields when they are not used
 PER_SPEED = (2, 3, 10, 11, 12)  # in FuelCost._tables: speed, R_hull, per_Hs2, R_grid, kg_h
 
 
@@ -148,20 +171,20 @@ def stacked_tables(costs: list[FuelCost]) -> tuple:
     return tuple(np.concatenate([a[i] for a in args]) if i in PER_SPEED else args[0][i] for i in range(len(args[0])))
 
 
-def fuel_kg(costs: list[FuelCost], args: tuple, lat_a, lon_a, lat_b, lon_b, hours=0.0) -> np.ndarray:
-    """FuelCost.kg at each of costs' speeds, shape (speeds, *moves); args from stacked_tables."""
+def fuel_kg(costs: list[FuelCost], args: tuple, lat_a, lon_a, lat_b, lon_b, hours=0.0) -> tuple[np.ndarray, np.ndarray]:
+    """FuelCost.kg_hours at each of costs' speeds, each shape (speeds, *moves); args from stacked_tables."""
     t0 = time.perf_counter()
     moves = np.broadcast_arrays(*(np.asarray(v, np.float64) for v in (lat_a, lon_a, lat_b, lon_b, hours)))
     shape = moves[0].shape
-    out, counts = np.empty((len(costs), moves[0].size)), np.zeros((len(costs), 3), np.int64)
-    kernel.fuel_kg(*(np.ascontiguousarray(v).ravel() for v in moves), out, counts, *args)
+    out, out_h, counts = np.empty((len(costs), moves[0].size)), np.empty((len(costs), moves[0].size)), np.zeros((len(costs), 3), np.int64)
+    kernel.fuel_kg(*(np.ascontiguousarray(v).ravel() for v in moves), out, out_h, counts, *args)
     seconds = (time.perf_counter() - t0) / len(costs)
     for c, n in zip(costs, counts):
         c.no_waves += int(n[0])
         c.over_mcr += int(n[1])
         c.beyond_forecast += int(n[2])
         c.seconds += seconds
-    return out.reshape(len(costs), *shape)
+    return out.reshape(len(costs), *shape), out_h.reshape(len(costs), *shape)
 
 def run(graph: Graph, ship: Ship, forecast: Forecast, speed_kn: float, max_seconds: float, land=None) -> list[dict]:
     """The shortest route, the fuel-optimal route in frozen weather and the one in moving weather,
