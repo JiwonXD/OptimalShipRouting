@@ -22,6 +22,17 @@ def summary(lat, lon, sharp: float = 60.0) -> dict:
     }
 
 
+def around(lat, lon, sharp: float, n: int) -> None:
+    """Print the points either side of each sharp turn: position, turn there and the leg on to the next."""
+    lat, lon = np.asarray(lat, float), np.asarray(lon, float)
+    turn = np.r_[np.nan, turn_deg(lat, lon), np.nan]  # at every point
+    seg_km = np.r_[haversine_km(lat[:-1], lon[:-1], lat[1:], lon[1:]), np.nan]
+    for i in np.nonzero(turn >= sharp)[0]:
+        for j in range(max(i - n, 0), min(i + n + 1, len(lat))):
+            print(f"    {'>' if j == i else ' '} {j:5d} ({lat[j]:.4f}, {lon[j]:.4f}) turn {turn[j]:5.0f}°, next leg {seg_km[j]:7.2f} km")
+        print()
+
+
 def main() -> None:
     import argparse
     import json
@@ -29,6 +40,7 @@ def main() -> None:
     parser = argparse.ArgumentParser(description="Count sharp turns in the routes of results .json files.")
     parser.add_argument("results", nargs="+", help="results .json files with lat/lon per route")
     parser.add_argument("--sharp", type=float, default=60.0, help="a turn this large or larger counts, degrees")
+    parser.add_argument("--around", type=int, default=0, help="also print this many points either side of each sharp turn")
     args = parser.parse_args()
 
     for path in args.results:
@@ -41,6 +53,8 @@ def main() -> None:
                     s = summary(found["lat"], found["lon"], args.sharp)
                     print(f"  {row['route']} {key}: {s['sharp']} of {s['points']} points turn ≥{args.sharp:g}° "
                           f"({s['over_90']} ≥90°, max {s['max_deg']}°, shorter leg median {s['shorter_leg_km']} km) {s['where'][:8]}")
+                    if args.around:
+                        around(found["lat"], found["lon"], args.sharp, args.around)
 
 
 if __name__ == "__main__":
