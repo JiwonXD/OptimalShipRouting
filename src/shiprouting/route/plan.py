@@ -79,6 +79,7 @@ def describe(r: SearchResult, fuel_kg: float, speeds_kn, seconds: float) -> dict
         "seconds": round(seconds, 1),
         "lat": np.round(r.lat, 4).tolist(),
         "lon": np.round(r.lon, 4).tolist(),
+        "on_link": r.on_link.tolist(),
         "segment_kn": np.round(speeds_kn, 2).tolist(),
     }
 
@@ -121,7 +122,7 @@ def main() -> None:
     point = [tuple(float(v) for v in p.split(",")) for p in (args.start, args.goal)]
     speeds = [float(v) for v in args.speeds_kn.split(",")]
     out = plan(graph, KCS_SHIP, forecast, *point, args.departure, args.deadline, speeds, args.tables, args.max_tries, args.max_seconds)
-    print({k: ({kk: vv for kk, vv in v.items() if kk not in ("lat", "lon", "segment_kn")} if isinstance(v, dict) else v)
+    print({k: ({kk: vv for kk, vv in v.items() if kk not in ("lat", "lon", "on_link", "segment_kn")} if isinstance(v, dict) else v)
            for k, v in out.items() if k != "tries"}, flush=True)
     with open(args.out, "w", encoding="utf-8") as f:
         json.dump(out, f, ensure_ascii=False)
