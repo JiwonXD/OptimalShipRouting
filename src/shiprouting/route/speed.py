@@ -126,17 +126,25 @@ def meet_eta(graph: Graph, s: int, g: int, choice: SpeedChoice, eta_hours: float
         print(f"  price {per_hour:8.1f} kg/h: {r.clock[-1]:7.1f} h, {fuel / 1000:8.2f} t, {r.seconds:5.1f} s", flush=True)
         return r, fuel
 
+    def in_time(r):
+        return r.clock[-1] <= eta_hours * (1 + 1e-9)  # a route sailed at exactly the speed for the ETA, give or take rounding
+
     lo, hi = 0.0, 1000.0
     while len(tries) < max_tries:
         r, fuel = search(hi)
-        if r.clock[-1] <= eta_hours:
+        if in_time(r):
             best = (r, fuel)
             break
         lo, hi = hi, hi * 4
-    while best is not None and len(tries) < max_tries and best[0].clock[-1] < eta_hours * (1 - tolerance):
+    if best is not None and lo == 0.0 and len(tries) < max_tries:  # in time at the first price: perhaps even at the slowest
+        r, fuel = search(0.0)
+        if in_time(r):
+            best = (r, fuel)
+            hi = 0.0
+    while best is not None and len(tries) < max_tries and hi > 0.0 and best[0].clock[-1] < eta_hours * (1 - tolerance):
         mid = (lo + hi) / 2
         r, fuel = search(mid)
-        if r.clock[-1] <= eta_hours:
+        if in_time(r):
             hi = mid
             if fuel < best[1]:
                 best = (r, fuel)
