@@ -71,3 +71,21 @@ def test_all_speeds_in_one_pass_match_each_speed_alone():
     for c, kg in zip(sc.costs, together):
         assert kg == pytest.approx(dataclasses.replace(c, beyond_forecast=0).kg(*args))
     assert [c.beyond_forecast for c in sc.costs] == [1, 1, 1]
+
+
+def test_a_band_of_head_current_is_sailed_around_and_the_speeds_are_read_back():
+    graph = Graph.build(Land([shapely.box(100.0, 30.0, 101.0, 31.0)]), root=1.0, min_step=0.5, lat_limits=(-20.0, 20.0))
+    fc = forecast(wind_u=-5.0, Hs=1.0, wave_from_x=1.0, T_m10=8.0)
+    band = (fc.lat >= 0) & (fc.lat <= 1)
+    fc.fields["current_u"][:, band] = -4.0  # m/s, against a ship heading east
+    s, g = graph.nearest(0.5, 150.5), graph.nearest(0.5, 158.5)
+    still = choice(fc, (12, 16, 20))
+    sc = SpeedChoice([dataclasses.replace(c, currents=True) for c in still.costs])
+    straight = astar(graph, s, g, still.edge_cost(graph), still.link_cost, lambda n: 0.0)
+    assert np.abs(straight.lat - 0.5).max() < 1
+    r, _ = meet_eta(graph, s, g, sc, straight.clock[-1] * 1.05, tolerance=0.01)
+    assert np.abs(r.lat - 0.5).max() > 1.5  # leaves the band
+    assert r.clock[-1] <= straight.clock[-1] * 1.05 * (1 + 1e-9)
+    assert set(np.round(sc.speeds_kn(r), 6)) <= {12.0, 16.0, 20.0}
+    assert r.cost == pytest.approx(sc.path(r))
+    assert sc.snap_up(r).clock == pytest.approx(r.clock)

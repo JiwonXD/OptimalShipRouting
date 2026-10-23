@@ -76,3 +76,14 @@ def test_smoothing_leaves_sharp_turns_only_at_the_waypoints():
         assert {(r["lat"][k], r["lon"][k]) for k in np.nonzero(turn >= 60)[0]} == set(via)
     legs = out["least_fuel"]["legs"]
     assert len(legs) == 3 and sum(leg["hours"] for leg in legs) == pytest.approx(out["least_fuel"]["hours"], abs=0.2)
+
+
+def test_against_a_current_the_shortest_route_speeds_up_to_keep_the_deadline():
+    fc = forecast(wind_u=-10.0, Hs=2.0, wave_from_x=1.0, T_m10=8.0, current_u=-1.0)
+    deadline = T0 + np.timedelta64(30 * 3600, "s")
+    out = plan_module.plan(GRAPH, KCS_SHIP, fc, START, GOAL, T0, deadline, (12, 16, 20))
+    still = plan_module.plan(GRAPH, KCS_SHIP, fc, START, GOAL, T0, deadline, (12, 16, 20), currents=False)
+    assert out["shortest"]["hours"] == pytest.approx(30.0, rel=0.002)
+    assert float(next(iter(out["shortest"]["speeds_kn"]))) > float(next(iter(still["shortest"]["speeds_kn"]))) + 1.5
+    assert out["least_fuel"]["hours"] <= 30.0 + 0.05
+    assert out["least_fuel"]["fuel_t"] <= out["shortest"]["fuel_t"]
