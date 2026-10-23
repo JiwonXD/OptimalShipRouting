@@ -134,18 +134,23 @@ class SpeedChoice:
 
 
 def meet_eta(graph: Graph, s: int, g: int, choice: SpeedChoice, eta_hours: float, tolerance: float = 0.002,
-             max_tries: int = 12, max_seconds: float = math.inf, via=()) -> tuple[SearchResult | None, list[dict]]:
-    """The least-fuel route found arriving within eta_hours, bisecting the price of an hour.
+             max_tries: int = 12, max_seconds: float = math.inf, via=(), price: float | None = None) -> tuple[SearchResult | None, list[dict]]:
+    """The least-fuel route found arriving within eta_hours, narrowing down the price of an hour.
 
     Through the nodes via in order, the legs are searched one after another at the same
     price, each setting out when the last one arrives.
+
+    The first price tried is 1000 kg/h, raised fourfold until a route arrives in time; given
+    `price` (one that met a like ETA before, say the last plan of the same voyage), 5% either
+    side of it. Between a price arriving late and one in time, the next is read off the
+    straight line through their arrival times, kept at least a tenth of the way from each.
 
     Stops when a route arrives within a fraction `tolerance` of the voyage before the ETA, or after max_tries
     searches. The best route that arrived in time then spends the time it has left
     (SpeedChoice.fill_slack). Returns that route (None if none arrived in time) and a log
     of the tries.
     """
-    tries, best = [], None
+    tries, best, hours = [], None, {}
 
     def search(per_hour):
         choice.per_hour = per_hour
@@ -155,28 +160,32 @@ def meet_eta(graph: Graph, s: int, g: int, choice: SpeedChoice, eta_hours: float
             clock = float(legs[-1].clock[-1])
         r = join_legs(legs)
         fuel = r.cost - per_hour * float(r.clock[-1])
+        hours[per_hour] = float(r.clock[-1])
         tries.append({"per_hour": round(per_hour, 1), "hours": round(float(r.clock[-1]), 1), "fuel_t": round(fuel / 1000, 2),
-                      "seconds": round(r.seconds, 1)})
+                      "seconds": round(r.seconds, 1), "in_time": bool(in_time(r))})
         print(f"  price {per_hour:8.1f} kg/h: {r.clock[-1]:7.1f} h, {fuel / 1000:8.2f} t, {r.seconds:5.1f} s", flush=True)
         return r, fuel
 
     def in_time(r):
         return r.clock[-1] <= eta_hours * (1 + 1e-9)  # a route sailed at exactly the speed for the ETA, give or take rounding
 
-    lo, hi = 0.0, 1000.0
+    lo, hi, grow = (0.0, 1000.0, 4.0) if price is None else (price / 1.05, price * 1.05, 1.25)
     while len(tries) < max_tries:
         r, fuel = search(hi)
         if in_time(r):
             best = (r, fuel)
             break
-        lo, hi = hi, hi * 4
-    if best is not None and lo == 0.0 and len(tries) < max_tries:  # in time at the first price: perhaps even at the slowest
-        r, fuel = search(0.0)
+        lo, hi = hi, hi * grow
+    if best is not None and lo not in hours and len(tries) < max_tries:  # in time at the first price: perhaps at lo too (even the slowest)
+        r, fuel = search(lo)
         if in_time(r):
             best = (r, fuel)
-            hi = 0.0
+            lo, hi = 0.0, lo
     while best is not None and len(tries) < max_tries and hi > 0.0 and best[0].clock[-1] < eta_hours * (1 - tolerance):
         mid = (lo + hi) / 2
+        if lo in hours and hours[lo] > hours[hi]:
+            x = (hours[lo] - eta_hours * (1 - tolerance / 2)) / (hours[lo] - hours[hi])
+            mid = lo + (hi - lo) * min(max(x, 0.1), 0.9)
         r, fuel = search(mid)
         if in_time(r):
             hi = mid

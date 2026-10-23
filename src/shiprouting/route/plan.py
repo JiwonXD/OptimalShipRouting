@@ -37,7 +37,9 @@ SPEEDS_KN = (12, 14, 16, 18, 20, 22, 24)
 
 def plan(graph: Graph, ship: Ship, forecast: Forecast, start, goal, departure, deadline, speeds_kn=SPEEDS_KN,
          tables: str | None = None, max_tries: int = 12, max_seconds: float = math.inf, via=(), legs: str = "distance",
-         land=None, currents: bool = True) -> dict:
+         land=None, currents: bool = True, prices=None) -> dict:
+    """prices: the price of an hour each leg met its time at in a like plan before (out["prices"]
+    of the last plan of the same voyage, say), to start from; one for legs="shared"."""
     departure, deadline = np.datetime64(departure, "s"), np.datetime64(deadline, "s")
     if not forecast.time[0] <= departure < forecast.time[-1]:
         raise ValueError(f"departure {departure} is outside the forecast")
@@ -93,14 +95,16 @@ def plan(graph: Graph, ship: Ship, forecast: Forecast, start, goal, departure, d
     # The shortest route's own speed is offered too, so sailing it as it does is among the choices.
     offered = sorted({*speeds_kn, kn})
     choice = SpeedChoice([cost(k) for k in offered])
+    prices = list(prices or [])
     if legs == "shared":
-        f, out["tries"] = meet_eta(graph, nodes[0], nodes[-1], choice, hours, max_tries=max_tries, max_seconds=max_seconds,
-                                   via=nodes[1:-1])
+        f, tries = meet_eta(graph, nodes[0], nodes[-1], choice, hours, max_tries=max_tries, max_seconds=max_seconds,
+                            via=nodes[1:-1], price=(prices or [None])[0])
+        out["tries"] = [tries]
     else:
         found, out["tries"], at = [], [], departure
-        for (a, b), leg in zip(zip(nodes[:-1], nodes[1:]), shortest):
+        for i, ((a, b), leg) in enumerate(zip(zip(nodes[:-1], nodes[1:]), shortest)):
             f, tries = meet_eta(graph, a, b, SpeedChoice([cost(k, at) for k in offered]), hours * leg.km / sum(r.km for r in shortest),
-                                max_tries=max_tries, max_seconds=max_seconds)
+                                max_tries=max_tries, max_seconds=max_seconds, price=prices[i] if i < len(prices) else None)
             out["tries"].append(tries)
             if f is None:
                 break
@@ -110,6 +114,7 @@ def plan(graph: Graph, ship: Ship, forecast: Forecast, start, goal, departure, d
     if f is None:
         out["error"] = "no route choosing speeds arrived by the deadline"
         return out
+    out["prices"] = [min(t["per_hour"] for t in tries if t["in_time"]) for tries in out["tries"]]  # the lowest that arrived in time
     if land is not None:
         f = choice.fill_slack(choice.snap_up(smoothed(f)), hours)
     out["least_fuel"] = describe(f, f.cost, choice.speeds_kn(f), float(f.clock[-1] - f.clock[0]), time.perf_counter() - t0)

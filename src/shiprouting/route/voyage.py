@@ -116,14 +116,14 @@ def voyage(graph: Graph, ship: Ship, land, runs: Runs, came: Forecast, start, go
     cells = {(round(float(a), 6), round(float(b), 6)) for a, b in zip(graph.lat, graph.lon)}
     pos, ahead, at = tuple(start), list(via), 0.0
     track = {"lat": [], "lon": [], "on_link": [], "segment_kn": [], "kg": [], "hours": []}
-    log, first, late = [], None, False
+    log, first, late, prices = [], None, False, None
     while True:
         now = departure + int(round(at * 3600)) * np.timedelta64(1, "s")
         run, forecast = runs.newest(now)
         t0 = time.perf_counter()
         target = deadline
         for _ in range(8):
-            p = plan(graph, ship, forecast, pos, goal, now, target, speeds_kn, tables, max_tries, max_seconds, ahead, land=land)
+            p = plan(graph, ship, forecast, pos, goal, now, target, speeds_kn, tables, max_tries, max_seconds, ahead, land=land, prices=prices)
             if "least_fuel" in p:
                 break
             late = True
@@ -141,6 +141,7 @@ def voyage(graph: Graph, ship: Ship, land, runs: Runs, came: Forecast, start, go
         log.append({
             "time": str(now), "run": str(run), "from": [round(float(v), 4) for v in pos], "deadline": str(target),
             "planned_t": f["fuel_t"], "planned_h": f["hours"], "seconds": round(time.perf_counter() - t0, 1),
+            "tries": sum(len(t) for t in p["tries"]),
             "sailed_km": round(float(seg_km.sum()), 1), "sailed_h": round(float(h.sum()), 1), "sailed_t": round(float(kg.sum()) / 1000, 2),
         })  # fmt: skip
         print(f"  {log[-1]}", flush=True)
@@ -155,7 +156,8 @@ def voyage(graph: Graph, ship: Ship, land, runs: Runs, came: Forecast, start, go
         track["hours"] += h.tolist()
         at += float(h.sum())
         legs_km = np.cumsum([leg["km"] for leg in f["legs"]])[:-1]
-        ahead = ahead[int((legs_km <= seg_km.sum() + 0.01).sum()) :]
+        passed = int((legs_km <= seg_km.sum() + 0.01).sum())
+        ahead, prices = ahead[passed:], p["prices"][passed:]  # the next plan starts from this one's prices
         if end == len(lat) - 1:
             break
         pos = (float(lat[end]), float(lon[end]))
