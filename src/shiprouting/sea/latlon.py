@@ -32,6 +32,19 @@ def haversine_km(lat1, lon1, lat2, lon2):
     return 2 * EARTH_RADIUS_KM * np.arcsin(np.sqrt(np.clip(a, 0.0, 1.0)))
 
 
+def turn_deg(lat, lon) -> np.ndarray:
+    """At each inner point of a path, how far the course turns there, degrees (0 = straight on):
+    from the course arriving along the last great circle to the course leaving along the next."""
+    p, l = np.radians(np.asarray(lat, float)), np.radians(np.asarray(lon, float))
+
+    def course(p1, l1, p2, l2):
+        return np.arctan2(np.sin(l2 - l1) * np.cos(p2), np.cos(p1) * np.sin(p2) - np.sin(p1) * np.cos(p2) * np.cos(l2 - l1))
+
+    arriving = course(p[1:-1], l[1:-1], p[:-2], l[:-2]) + np.pi  # the course from the point back, turned round
+    leaving = course(p[1:-1], l[1:-1], p[2:], l[2:])
+    return np.degrees(np.abs((leaving - arriving + np.pi) % (2 * np.pi) - np.pi))
+
+
 @dataclass(frozen=True)
 class LatLonGrid:
     step: float  # cell size, degrees
