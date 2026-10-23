@@ -142,6 +142,7 @@ def main() -> None:
     for path in args.results:
         with open(path, encoding="utf-8") as f:
             rows = json.load(f)
+        rows = [rows] if isinstance(rows, dict) else rows  # one plan, or rows of test voyages
         print(path)
         for row in rows:
             for key, found in row.items():

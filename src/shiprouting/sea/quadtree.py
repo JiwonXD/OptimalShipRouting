@@ -158,7 +158,8 @@ def join(land: Land, graph: Graph, lat: float, lon: float, tries: int = 100):
 
 
 def astar(
-    graph: Graph, s: int, g: int, edge_cost=None, link_cost=None, heuristic=None, max_seconds: float = math.inf
+    graph: Graph, s: int, g: int, edge_cost=None, link_cost=None, heuristic=None, max_seconds: float = math.inf,
+    clock0: float = 0.0,
 ) -> SearchResult:
     """Shortest path from node s to node g.
 
@@ -167,6 +168,7 @@ def astar(
     edge, aligned with graph.indices, or is a function `edge_cost(c, clock)` giving the costs of
     node c's edges and how far each moves the clock; `link_cost(link, km, clock)` gives the cost
     and clock step of taking a link. `heuristic(n)` is a lower bound on the cost from n to g.
+    The clock starts at clock0.
     The result's km is the length of the path found, cost what was minimised, and clock the
     clock at each point (on a link's own points, spread by distance).
     """
@@ -190,7 +192,7 @@ def astar(
     link_cost = link_cost or (lambda link, km, clock: (km, km))
 
     best = {s: 0.0}
-    clock = {s: 0.0}  # along the best path
+    clock = {s: clock0}  # along the best path
     parent = {s: None}
     closed = set()
     open_list = [(h(s), s)]
@@ -245,6 +247,24 @@ def astar(
     return SearchResult(lat, lon, np.array(on_link, bool), used, km, expanded, time.perf_counter() - t0, best[g], np.array(at))
 
 
+def join_legs(legs: list[SearchResult]) -> SearchResult:
+    """The legs as one path, each leg's clock carrying on from where the last one ended."""
+    clock = [legs[0].clock]
+    for r in legs[1:]:
+        clock.append(r.clock[1:] - r.clock[0] + clock[-1][-1])
+    return SearchResult(
+        np.concatenate([legs[0].lat] + [r.lat[1:] for r in legs[1:]]),
+        np.concatenate([legs[0].lon] + [r.lon[1:] for r in legs[1:]]),
+        np.concatenate([r.on_link for r in legs]),
+        [name for r in legs for name in r.links],
+        sum(r.km for r in legs),
+        sum(r.expanded for r in legs),
+        sum(r.seconds for r in legs),
+        sum(r.cost for r in legs),
+        np.concatenate(clock),
+    )
+
+
 def straighten(land: Land, r: SearchResult, clearance_km: float = 0.0) -> SearchResult:
     """Cut the corners of a path: from each kept point, go straight to the farthest later point
     the great-circle arc to which stays clearance_km off land. Links are kept as they are."""
@@ -272,13 +292,13 @@ def straighten(land: Land, r: SearchResult, clearance_km: float = 0.0) -> Search
     return SearchResult(lat, lon, np.array(on_link, bool), r.links, km, r.expanded, time.perf_counter() - t0)
 
 
-def smooth_turns(land: Land, r: SearchResult, sharp: float = 60.0, reach: int = 4) -> SearchResult:
+def smooth_turns(land: Land, r: SearchResult, sharp: float = 60.0, reach: int = 4, keep_points=()) -> SearchResult:
     """Take out the points where the course turns by `sharp` degrees or more.
 
     The sharpest such point goes first: it and up to reach - 1 neighbours are dropped, the
     fewest that leave a great-circle leg clear of land. Points on links and the two ends
-    stay. Repeats until no sharp point can be dropped, then cuts the corners that are left
-    (cut_corners). Unlike straighten, the path stays close to the one found, so a route
+    stay, and so do the points at the indices keep_points (waypoints). Repeats until no sharp
+    point can be dropped, then cuts the corners that are left (cut_corners). Unlike straighten, the path stays close to the one found, so a route
     chosen for its weather keeps its way.
     """
     t0 = time.perf_counter()
@@ -288,6 +308,7 @@ def smooth_turns(land: Land, r: SearchResult, sharp: float = 60.0, reach: int = 
     fixed[[0, -1]] = True
     fixed[:-1] |= on_link
     fixed[1:] |= on_link
+    fixed[list(keep_points)] = True
     keep = np.ones(len(lat), bool)
     stuck = set()
     while True:
@@ -311,6 +332,7 @@ def smooth_turns(land: Land, r: SearchResult, sharp: float = 60.0, reach: int = 
     seg_link = on_link[idx[:-1]] & (np.diff(idx) == 1)
     clock = None if r.clock is None else r.clock[idx]
     keep_put = np.r_[True, seg_link[:-1] & seg_link[1:], True]  # the two ends and the points inside a link
+    keep_put |= np.isin(idx, list(keep_points))
     lat, lon, seg_link, clock = cut_corners(land, lat[idx], lon[idx], keep_put, seg_link, clock, sharp)
     lon = (lon + 180) % 360 - 180
     km = float(haversine_km(lat[:-1], lon[:-1], lat[1:], lon[1:]).sum())
