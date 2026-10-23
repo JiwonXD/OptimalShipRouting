@@ -105,3 +105,18 @@ def test_slack_is_spent_when_slowing_down_meets_a_stronger_current_later():
     assert r16.clock[-1] < r.clock[-1] <= eta
     assert r.cost < sc.path(r16)
     assert r.cost == pytest.approx(sc.path(r))
+
+
+def test_starting_from_a_price_that_met_the_eta_before_takes_fewer_tries():
+    graph = Graph.build(Land([shapely.box(100.0, 30.0, 101.0, 31.0)]), root=1.0, min_step=0.5, lat_limits=(-20.0, 20.0))
+    fc = forecast(wind_u=-10.0, Hs=2.0, wave_from_x=1.0, T_m10=8.0)
+    sc = choice(fc, (12, 14, 16, 18, 20))
+    s, g = graph.nearest(0.5, 150.5), graph.nearest(5.5, 160.5)
+    fixed = sc.costs[2]  # 16 kn
+    eta = astar(graph, s, g, fixed.costs(graph), fixed.link_cost, lambda n: 0.0).clock[-1] * 1.001
+    cold, cold_tries = meet_eta(graph, s, g, sc, eta)
+    price = min(t["per_hour"] for t in cold_tries if t["in_time"])
+    warm, warm_tries = meet_eta(graph, s, g, sc, eta, price=price * 1.02)  # the weather has moved on a little
+    assert len(warm_tries) < len(cold_tries)
+    assert warm.clock[-1] <= eta * (1 + 1e-9)
+    assert warm.cost == pytest.approx(cold.cost, rel=0.005)

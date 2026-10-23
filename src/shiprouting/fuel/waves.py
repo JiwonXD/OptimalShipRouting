@@ -219,6 +219,18 @@ class AddedResistanceTable:
         np.savez(path, T01=table.T01, angle=table.angle, per_Hs2=table.per_Hs2)
         return table
 
+    @classmethod
+    def between(cls, folder: str, sk: Seakeeping, speed: float, step: float = 0.5 * 1852 / 3600, T01=None, angle=None) -> "AddedResistanceTable":
+        """cached at the speeds every `step` m/s either side of speed, blended linearly in speed: a
+        speed off that grid (one met to a deadline, say) needs no table of its own built."""
+        k = math.floor(speed / step + 1e-9)
+        w = speed / step - k
+        below = cls.cached(folder, sk, k * step, T01=T01, angle=angle)
+        if w < 1e-9:
+            return below
+        above = cls.cached(folder, sk, (k + 1) * step, T01=T01, angle=angle)
+        return cls(below.T01, below.angle, (1 - w) * below.per_Hs2 + w * above.per_Hs2)
+
     def __call__(self, Hs, T01, wave_angle):
         """Added resistance, N, like ``added_resistance`` at the table's speed and spreading; works on arrays."""
         Hs, T01, wave_angle = np.broadcast_arrays(*(np.asarray(v, float) for v in (Hs, T01, wave_angle)))

@@ -61,8 +61,8 @@ def download(run: datetime, steps, target_dir, resol: str = "0p25", source: str 
     return paths
 
 
-def load(paths) -> Forecast:
-    """Read GRIB2 files with the PARAMS into one Forecast.
+def load(paths, dtype=np.float64) -> Forecast:
+    """Read GRIB2 files with the PARAMS into one Forecast, its fields of dtype.
 
     Every variable must be present at every valid time, on the same regular
     global grid. Wave direction is stored as the east and north components of
@@ -96,17 +96,19 @@ def load(paths) -> Forecast:
                     raise ValueError(f"{path}: {short} is on a different grid")
                 if short == "mwd":
                     rad = np.radians(values)
-                    grids["wave_from_x", valid] = np.sin(rad)
-                    grids["wave_from_y", valid] = np.cos(rad)
+                    grids["wave_from_x", valid] = np.sin(rad).astype(dtype)
+                    grids["wave_from_y", valid] = np.cos(rad).astype(dtype)
                 else:
-                    grids[NAMES[short], valid] = values
+                    grids[NAMES[short], valid] = values.astype(dtype)
 
     names = sorted({name for name, _ in grids})
     times = np.array(sorted({t for _, t in grids}))
     missing = [(n, t) for n in names for t in times if (n, t) not in grids]
     if missing:
         raise ValueError(f"missing fields: {missing}")
-    fields = {n: np.stack([grids[n, t] for t in times]) for n in names}
+    fields = {}
+    for n in names:  # taking the grids out as they are stacked keeps memory at about one copy
+        fields[n] = np.stack([grids.pop((n, t)) for t in times])
     return Forecast(lat=lat, lon=lon, time=times, fields=fields)
 
 

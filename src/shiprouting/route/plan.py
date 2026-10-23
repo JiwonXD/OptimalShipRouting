@@ -37,7 +37,9 @@ SPEEDS_KN = (12, 14, 16, 18, 20, 22, 24)
 
 def plan(graph: Graph, ship: Ship, forecast: Forecast, start, goal, departure, deadline, speeds_kn=SPEEDS_KN,
          tables: str | None = None, max_tries: int = 12, max_seconds: float = math.inf, via=(), legs: str = "distance",
-         land=None, currents: bool = True) -> dict:
+         land=None, currents: bool = True, prices=None) -> dict:
+    """prices: the price of an hour each leg met its time at in a like plan before (out["prices"]
+    of the last plan of the same voyage, say), to start from; one for legs="shared"."""
     departure, deadline = np.datetime64(departure, "s"), np.datetime64(deadline, "s")
     if not forecast.time[0] <= departure < forecast.time[-1]:
         raise ValueError(f"departure {departure} is outside the forecast")
@@ -55,7 +57,7 @@ def plan(graph: Graph, ship: Ship, forecast: Forecast, start, goal, departure, d
     def cost(kn, at=departure):
         if kn not in waves:
             if tables:
-                waves[kn] = AddedResistanceTable.cached(tables, ship.seakeeping, kn * KNOT)
+                waves[kn] = AddedResistanceTable.between(tables, ship.seakeeping, kn * KNOT)
             else:
                 waves[kn] = AddedResistanceTable.build(ship.seakeeping, kn * KNOT)
         return FuelCost(ship, forecast, at, kn * KNOT, waves[kn], frozen=False, currents=currents)
@@ -93,14 +95,16 @@ def plan(graph: Graph, ship: Ship, forecast: Forecast, start, goal, departure, d
     # The shortest route's own speed is offered too, so sailing it as it does is among the choices.
     offered = sorted({*speeds_kn, kn})
     choice = SpeedChoice([cost(k) for k in offered])
+    prices = list(prices or [])
     if legs == "shared":
-        f, out["tries"] = meet_eta(graph, nodes[0], nodes[-1], choice, hours, max_tries=max_tries, max_seconds=max_seconds,
-                                   via=nodes[1:-1])
+        f, tries = meet_eta(graph, nodes[0], nodes[-1], choice, hours, max_tries=max_tries, max_seconds=max_seconds,
+                            via=nodes[1:-1], price=(prices or [None])[0])
+        out["tries"] = [tries]
     else:
         found, out["tries"], at = [], [], departure
-        for (a, b), leg in zip(zip(nodes[:-1], nodes[1:]), shortest):
+        for i, ((a, b), leg) in enumerate(zip(zip(nodes[:-1], nodes[1:]), shortest)):
             f, tries = meet_eta(graph, a, b, SpeedChoice([cost(k, at) for k in offered]), hours * leg.km / sum(r.km for r in shortest),
-                                max_tries=max_tries, max_seconds=max_seconds)
+                                max_tries=max_tries, max_seconds=max_seconds, price=prices[i] if i < len(prices) else None)
             out["tries"].append(tries)
             if f is None:
                 break
@@ -110,6 +114,7 @@ def plan(graph: Graph, ship: Ship, forecast: Forecast, start, goal, departure, d
     if f is None:
         out["error"] = "no route choosing speeds arrived by the deadline"
         return out
+    out["prices"] = [min(t["per_hour"] for t in tries if t["in_time"]) for tries in out["tries"]]  # the lowest that arrived in time
     if land is not None:
         f = choice.fill_slack(choice.snap_up(smoothed(f)), hours)
     out["least_fuel"] = describe(f, f.cost, choice.speeds_kn(f), float(f.clock[-1] - f.clock[0]), time.perf_counter() - t0)
@@ -138,39 +143,21 @@ def describe(r: SearchResult, fuel_kg: float, speeds_kn, hours: float, seconds: 
     }
 
 
-def main() -> None:
-    import argparse
-    import glob
-    import json
-
-    from shiprouting.fuel.ships import KCS_SHIP
-    from shiprouting.sea.land import load_osm_land_polygons
-    from shiprouting.weather import ecmwf
-
-    parser = argparse.ArgumentParser(description="The shortest and the least-fuel route of one voyage, arriving by a deadline.")
-    parser.add_argument("land", help="land polygons shapefile")
-    parser.add_argument("forecast", help="glob of the ECMWF GRIB2 files")
-    parser.add_argument("out", help="result .json")
-    parser.add_argument("--start", required=True, help="lat,lon")
-    parser.add_argument("--goal", required=True, help="lat,lon")
-    parser.add_argument("--via", action="append", default=[], help="lat,lon of a waypoint, passed in the order given; repeat for more")
-    parser.add_argument("--departure", required=True, help="UTC, e.g. 2026-10-22T00:00")
-    parser.add_argument("--deadline", required=True, help="UTC, e.g. 2026-11-05T12:00")
-    parser.add_argument("--speeds-kn", default=",".join(map(str, SPEEDS_KN)), help="speeds to choose from, comma-separated")
+def add_sea_args(parser) -> None:
+    """The command-line options for the sea graph (see sea_graph)."""
     parser.add_argument("--min-step", type=float, default=1 / 64)
     parser.add_argument("--links", help="folder with the Overpass canal and strait files (see links.LINKS)")
-    parser.add_argument("--tables", help="folder to keep the wave added resistance tables in between runs")
-    parser.add_argument("--max-tries", type=int, default=12, help="searches to meet the deadline")
-    parser.add_argument("--max-seconds", type=float, default=600.0, help="give up a search after this long")
     parser.add_argument("--bathymetry", help="GEBCO grid, netCDF: keep out of water --min-depth m deep or less")
     parser.add_argument("--min-depth", type=float, default=15.0)
     parser.add_argument("--link-approach-km", type=float, default=10.0, help="no depth check this close to a link's sea end")
     parser.add_argument("--graph", help=".npz file to keep the graph in between runs; rebuilt when the options above change")
-    parser.add_argument("--legs", choices=["distance", "shared"], default="distance",
-                        help="time per leg: in proportion to distance, or one price of an hour for the whole voyage")
-    parser.add_argument("--no-smoothing", action="store_true", help="leave sharp turns as found")
-    parser.add_argument("--no-currents", action="store_true", help="leave the surface current out")
-    args = parser.parse_args()
+
+
+def sea_graph(args):
+    """The land (with the shallow water, given the bathymetry) and the sea graph, from add_sea_args' options."""
+    import json
+
+    from shiprouting.sea.land import load_osm_land_polygons
 
     land = load_osm_land_polygons(args.land)
     links = []
@@ -186,6 +173,38 @@ def main() -> None:
     key = json.dumps({k: getattr(args, k) for k in ("land", "min_step", "links", "bathymetry", "min_depth", "link_approach_km")})
     graph = Graph.cached(args.graph, key, lambda: Graph.build(land, min_step=args.min_step, links=links))
     print(f"graph: {len(graph.lat)} cells, links {[k.name for *_, k in graph.links]}, ready in {time.perf_counter() - t0:.0f} s", flush=True)
+    return land, graph
+
+
+def main() -> None:
+    import argparse
+    import glob
+    import json
+
+    from shiprouting.fuel.ships import KCS_SHIP
+    from shiprouting.weather import ecmwf
+
+    parser = argparse.ArgumentParser(description="The shortest and the least-fuel route of one voyage, arriving by a deadline.")
+    parser.add_argument("land", help="land polygons shapefile")
+    parser.add_argument("forecast", help="glob of the ECMWF GRIB2 files")
+    parser.add_argument("out", help="result .json")
+    parser.add_argument("--start", required=True, help="lat,lon")
+    parser.add_argument("--goal", required=True, help="lat,lon")
+    parser.add_argument("--via", action="append", default=[], help="lat,lon of a waypoint, passed in the order given; repeat for more")
+    parser.add_argument("--departure", required=True, help="UTC, e.g. 2026-10-22T00:00")
+    parser.add_argument("--deadline", required=True, help="UTC, e.g. 2026-11-05T12:00")
+    parser.add_argument("--speeds-kn", default=",".join(map(str, SPEEDS_KN)), help="speeds to choose from, comma-separated")
+    parser.add_argument("--tables", help="folder to keep the wave added resistance tables in between runs")
+    parser.add_argument("--max-tries", type=int, default=12, help="searches to meet the deadline")
+    parser.add_argument("--max-seconds", type=float, default=600.0, help="give up a search after this long")
+    add_sea_args(parser)
+    parser.add_argument("--legs", choices=["distance", "shared"], default="distance",
+                        help="time per leg: in proportion to distance, or one price of an hour for the whole voyage")
+    parser.add_argument("--no-smoothing", action="store_true", help="leave sharp turns as found")
+    parser.add_argument("--no-currents", action="store_true", help="leave the surface current out")
+    args = parser.parse_args()
+
+    land, graph = sea_graph(args)
     forecast = ecmwf.load(sorted(glob.glob(args.forecast)))
     start, goal, *via = [tuple(float(v) for v in p.split(",")) for p in (args.start, args.goal, *args.via)]
     speeds = [float(v) for v in args.speeds_kn.split(",")]
