@@ -23,6 +23,8 @@ LINKS = {
     "보스포루스": ("straits_bosporus.json", (41.226, 29.131), (40.979, 28.989), "separation_lane"),
 }
 
+MIN_STEP_KM = 0.05  # a node closer than this to the one before adds nothing to a ship's way
+
 
 @dataclass(frozen=True)
 class Link:
@@ -69,7 +71,12 @@ def chain(name: str, ways: list[dict], a: tuple[float, float], b: tuple[float, f
     while parent[path[-1]] is not None:
         path.append(parent[path[-1]])
     lat, lon = np.array([pos[n] for n in reversed(path)]).T
-    return Link(name, lat, lon)
+    keep = [0]  # OSM can put two nodes on one spot, or metres apart
+    for i in range(1, len(lat)):
+        if haversine_km(lat[keep[-1]], lon[keep[-1]], lat[i], lon[i]) >= MIN_STEP_KM:
+            keep.append(i)
+    keep[-1] = len(lat) - 1
+    return Link(name, lat[keep], lon[keep])
 
 
 def load_links(osm_dir) -> list[Link]:

@@ -1,3 +1,5 @@
+import dataclasses
+
 import numpy as np
 import pytest
 import shapely
@@ -122,3 +124,61 @@ def test_arcs_can_be_required_to_keep_clear_of_land():
     assert not arcs_on_land(island, 0.105, 9.0, 0.105, 11.0).any()
     assert not arcs_on_land(island, 0.105, 9.0, 0.105, 11.0, clearance_km=0.3).any()
     assert arcs_on_land(island, 0.105, 9.0, 0.105, 11.0, clearance_km=1.0).all()
+
+
+def path(points, on_link=None):
+    from shiprouting.sea.latlon import SearchResult
+
+    lat, lon = (np.array(v, float) for v in zip(*points))
+    on_link = np.zeros(len(lat) - 1, bool) if on_link is None else np.array(on_link)
+    return SearchResult(lat, lon, on_link, [], float(haversine_km(lat[:-1], lon[:-1], lat[1:], lon[1:]).sum()), 0, 0.0)
+
+
+def test_a_spike_is_smoothed_out():
+    from shiprouting.sea.latlon import turn_deg
+    from shiprouting.sea.quadtree import smooth_turns
+
+    r = path([(0, 0), (0, 1), (0.3, 1.05), (0, 1.1), (0, 2)])  # a 0.3° detour north and straight back
+    s = smooth_turns(Land([]), r)
+    assert (turn_deg(s.lat, s.lon) < 60).all()
+    assert s.lat.tolist() == [0, 0, 0, 0] and s.lon == pytest.approx([0, 1, 1.1, 2])
+    assert s.km < r.km
+
+
+def test_a_links_own_turns_are_kept_and_its_ends_stay_on_it():
+    from shiprouting.sea.latlon import turn_deg
+    from shiprouting.sea.quadtree import smooth_turns
+
+    r = path([(0, 0), (0, 1), (1, 1.1), (0, 1.2), (0, 2)], on_link=[False, True, True, False])  # the spike is a link's
+    s = smooth_turns(Land([]), r)
+    tip = np.flatnonzero(np.isclose(s.lat, 1) & np.isclose(s.lon, 1.1))
+    assert len(tip) == 1 and s.on_link[tip[0] - 1] and s.on_link[tip[0]]
+    # The link's ends (84° turns) are cut, with the new points on the link's legs.
+    assert (turn_deg(s.lat, s.lon)[[0, -1]] < 60).all()
+    up = (s.lat > 0) & (s.lon < 1.1)
+    assert np.allclose(s.lon[up] - 1, s.lat[up] * 0.1, atol=1e-3)
+
+
+def test_a_corner_that_cannot_be_dropped_is_cut():
+    from shiprouting.sea.latlon import turn_deg
+    from shiprouting.sea.quadtree import arcs_on_land, smooth_turns
+
+    corner = Land([shapely.box(0.2, 0.2, 2.0, 2.0)])
+    r = path([(0, 1), (0, 0.1), (1, 0.1)])  # 90° round the corner of the land
+    r = dataclasses.replace(r, clock=np.array([0.0, 10.0, 20.0]))
+    s = smooth_turns(corner, r)
+    assert (turn_deg(s.lat, s.lon) < 60).all()
+    assert not arcs_on_land(corner, s.lat[:-1], s.lon[:-1], s.lat[1:], s.lon[1:]).any()
+    assert [s.lat[0], s.lon[0], s.lat[-1], s.lon[-1]] == pytest.approx([0, 1, 1, 0.1]) and s.km < r.km
+    assert len(s.clock) == len(s.lat) and (np.diff(s.clock) > 0).all() and s.clock[[0, -1]].tolist() == [0, 20]
+
+
+def test_a_v_shaped_corner_is_cut_twice():
+    from shiprouting.sea.latlon import turn_deg
+    from shiprouting.sea.quadtree import smooth_turns
+
+    wall = Land([shapely.box(0.99, 0.3, 1.01, 2.0)])  # the corner can't be dropped: the wall is in the way
+    r = path([(1, 0.9), (0, 1), (1, 1.1)])  # turns by about 168°
+    s = smooth_turns(wall, r)
+    assert len(s.lat) >= 5
+    assert (turn_deg(s.lat, s.lon) < 60).all()

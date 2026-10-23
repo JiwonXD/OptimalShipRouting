@@ -1,8 +1,9 @@
+import numpy as np
 import pytest
 import shapely
 
 from shiprouting.sea.land import Land
-from shiprouting.sea.latlon import MOVES, LatLonGrid, astar, haversine_km
+from shiprouting.sea.latlon import MOVES, LatLonGrid, astar, haversine_km, turn_deg
 
 LAND = Land([shapely.box(0.0, 0.0, 20.0, 20.0)])
 
@@ -98,3 +99,13 @@ def test_water_cells_with_no_open_move_are_not_water():
     ring = shapely.box(4.0, 4.0, 7.0, 7.0).difference(shapely.box(5.2, 5.2, 5.8, 5.8))
     g = LatLonGrid.build(Land([ring]), 1.0)
     assert not g.water[g.cell(5.5, 5.5)] and not g.moves[g.cell(5.5, 5.5)].any()
+
+
+def test_turn_deg():
+    # Straight on along the equator, a right angle north, and back the way it came.
+    assert turn_deg([0, 0, 0], [0, 1, 2]) == pytest.approx([0.0], abs=1e-9)
+    assert turn_deg([0, 0, 1], [0, 1, 1]) == pytest.approx([90.0], abs=0.01)
+    assert turn_deg([0, 0, 0], [0, 1, 0]) == pytest.approx([180.0])
+    # Along a great circle that is not a parallel: no turn, though the course changes along it.
+    lat = np.degrees(np.arctan(np.tan(np.radians(45.0)) * np.sin(np.radians([10.0, 40.0, 70.0]))))
+    assert turn_deg(lat, [10.0, 40.0, 70.0]) == pytest.approx([0.0], abs=1e-9)
