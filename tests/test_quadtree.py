@@ -145,11 +145,18 @@ def test_a_spike_is_smoothed_out():
     assert s.km < r.km
 
 
-def test_a_links_turns_are_kept():
+def test_a_links_own_turns_are_kept_and_its_ends_stay_on_it():
+    from shiprouting.sea.latlon import turn_deg
     from shiprouting.sea.quadtree import smooth_turns
 
     r = path([(0, 0), (0, 1), (1, 1.1), (0, 1.2), (0, 2)], on_link=[False, True, True, False])  # the spike is a link's
-    assert smooth_turns(Land([]), r).lat.tolist() == r.lat.tolist()
+    s = smooth_turns(Land([]), r)
+    tip = np.flatnonzero(np.isclose(s.lat, 1) & np.isclose(s.lon, 1.1))
+    assert len(tip) == 1 and s.on_link[tip[0] - 1] and s.on_link[tip[0]]
+    # The link's ends (84° turns) are cut, with the new points on the link's legs.
+    assert (turn_deg(s.lat, s.lon)[[0, -1]] < 60).all()
+    up = (s.lat > 0) & (s.lon < 1.1)
+    assert np.allclose(s.lon[up] - 1, s.lat[up] * 0.1, atol=1e-3)
 
 
 def test_a_corner_that_cannot_be_dropped_is_cut():

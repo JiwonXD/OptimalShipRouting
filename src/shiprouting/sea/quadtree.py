@@ -275,7 +275,8 @@ def smooth_turns(land: Land, r: SearchResult, sharp: float = 60.0, reach: int = 
     idx = np.nonzero(keep)[0]
     seg_link = on_link[idx[:-1]] & (np.diff(idx) == 1)
     clock = None if r.clock is None else r.clock[idx]
-    lat, lon, seg_link, clock = cut_corners(land, lat[idx], lon[idx], fixed[idx], seg_link, clock, sharp)
+    keep_put = np.r_[True, seg_link[:-1] & seg_link[1:], True]  # the two ends and the points inside a link
+    lat, lon, seg_link, clock = cut_corners(land, lat[idx], lon[idx], keep_put, seg_link, clock, sharp)
     lon = (lon + 180) % 360 - 180
     km = float(haversine_km(lat[:-1], lon[:-1], lat[1:], lon[1:]).sum())
     return SearchResult(lat, lon, seg_link, r.links, km, r.expanded, time.perf_counter() - t0, r.cost, clock)
@@ -287,8 +288,9 @@ def cut_corners(land: Land, lat, lon, fixed, seg_link, clock, sharp: float = 60.
     A corner P between A and B gives way to two points the same distance d from P, one
     towards A and one towards B, with d the largest of `fractions` times the shorter leg
     whose new leg is clear of land. The turn is split in two halves, so a corner of 120°
-    or more is cut again. Fixed points stay; lon is unwrapped and stays so. The clock of a
-    new point is read off its leg by distance.
+    or more is cut again. Fixed points stay. A link's end may be cut: the new point
+    lies on the link's first leg, so the link's way is still followed. Lon is unwrapped
+    and stays so. The clock of a new point is read off its leg by distance.
     """
     lat, lon, fixed = np.asarray(lat, float), np.asarray(lon, float), np.asarray(fixed, bool)
     stuck = np.zeros(len(lat), bool)
