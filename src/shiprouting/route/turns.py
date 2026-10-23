@@ -46,12 +46,13 @@ def main() -> None:
     for path in args.results:
         with open(path, encoding="utf-8") as f:
             rows = json.load(f)
+        rows = [rows] if isinstance(rows, dict) else rows  # one plan, or rows of test voyages
         print(path)
         for row in rows:
             for key, found in row.items():
                 if isinstance(found, dict) and "lat" in found:
                     s = summary(found["lat"], found["lon"], args.sharp)
-                    print(f"  {row['route']} {key}: {s['sharp']} of {s['points']} points turn ≥{args.sharp:g}° "
+                    print(f"  {row.get('route', '')} {key}: {s['sharp']} of {s['points']} points turn ≥{args.sharp:g}° "
                           f"({s['over_90']} ≥90°, max {s['max_deg']}°, shorter leg median {s['shorter_leg_km']} km) {s['where'][:8]}")
                     if args.around:
                         around(found["lat"], found["lon"], args.sharp, args.around)

@@ -19,7 +19,7 @@ import numpy as np
 
 from shiprouting.route.fuel import KNOT, FuelCost, fuel_kg, stacked_tables
 from shiprouting.sea.latlon import SearchResult, haversine_km
-from shiprouting.sea.quadtree import Graph, astar
+from shiprouting.sea.quadtree import Graph, astar, join_legs
 
 
 @dataclass
@@ -71,6 +71,15 @@ class SpeedChoice:
             kg += c.kg(r.lat[a], r.lon[a], r.lat[a + 1], r.lon[a + 1], r.clock[a]).sum()
         return float(kg)
 
+    def snap_up(self, r: SearchResult) -> SearchResult:
+        """Each segment at the slowest offered speed no slower than its own, so the path arrives no
+        later: a path smoothed after the search has segments whose speeds are not on offer."""
+        speeds = np.array([c.speed for c in self.costs]) / KNOT
+        with np.errstate(divide="ignore"):
+            k = np.minimum(np.searchsorted(speeds, self.speeds_kn(r) * (1 - 1e-9)), len(speeds) - 1)
+        seg_km = haversine_km(r.lat[:-1], r.lon[:-1], r.lat[1:], r.lon[1:])
+        return dataclasses.replace(r, clock=r.clock[0] + np.r_[0.0, np.cumsum(seg_km / (speeds[k] * 1.852))])
+
     def fill_slack(self, r: SearchResult, eta_hours: float, rounds: int = 20) -> SearchResult:
         """Spend the time a found path leaves before eta_hours: step segments down to the next
         slower speed, those saving the most fuel per extra hour first. Each round re-costs the
@@ -107,8 +116,11 @@ class SpeedChoice:
 
 
 def meet_eta(graph: Graph, s: int, g: int, choice: SpeedChoice, eta_hours: float, tolerance: float = 0.002,
-             max_tries: int = 12, max_seconds: float = math.inf) -> tuple[SearchResult | None, list[dict]]:
+             max_tries: int = 12, max_seconds: float = math.inf, via=()) -> tuple[SearchResult | None, list[dict]]:
     """The least-fuel route found arriving within eta_hours, bisecting the price of an hour.
+
+    Through the nodes via in order, the legs are searched one after another at the same
+    price, each setting out when the last one arrives.
 
     Stops when a route arrives within a fraction `tolerance` of the voyage before the ETA, or after max_tries
     searches. The best route that arrived in time then spends the time it has left
@@ -119,7 +131,11 @@ def meet_eta(graph: Graph, s: int, g: int, choice: SpeedChoice, eta_hours: float
 
     def search(per_hour):
         choice.per_hour = per_hour
-        r = astar(graph, s, g, choice.edge_cost(graph), choice.link_cost, lambda n: 0.0, max_seconds)
+        legs, clock = [], 0.0
+        for a, b in zip([s, *via], [*via, g]):
+            legs.append(astar(graph, a, b, choice.edge_cost(graph), choice.link_cost, lambda n: 0.0, max_seconds, clock))
+            clock = float(legs[-1].clock[-1])
+        r = join_legs(legs)
         fuel = r.cost - per_hour * float(r.clock[-1])
         tries.append({"per_hour": round(per_hour, 1), "hours": round(float(r.clock[-1]), 1), "fuel_t": round(fuel / 1000, 2),
                       "seconds": round(r.seconds, 1)})

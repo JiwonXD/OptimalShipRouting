@@ -51,6 +51,28 @@ def test_links_join_cells_near_their_ends(graph):
     assert r.clock[-1] == pytest.approx(r.km)
 
 
+def test_a_kept_graph_is_read_back_and_rebuilt_when_built_another_way(tmp_path):
+    canal = Link("운하", np.array([-20.0, -20.0]), np.array([-0.5, 2.5]))
+    g = Graph.build(WALL, root=1.0, min_step=1 / 16, lat_limits=(-40.0, 40.0), links=[canal])
+    path, built = str(tmp_path / "graph.npz"), []
+
+    def build():
+        built.append(1)
+        return g
+
+    Graph.cached(path, "a", build)
+    back = Graph.cached(path, "a", build)
+    assert len(built) == 1
+    for name in ("lat", "lon", "size", "indptr", "indices", "km"):
+        assert np.array_equal(getattr(back, name), getattr(g, name))
+    (a, b, link), = back.links
+    assert (a, b) == g.links[0][:2] and link.name == "운하" and np.array_equal(link.lon, canal.lon)
+    r = astar(back, back.nearest(-20.5, -5.5), back.nearest(-20.5, 7.5))
+    assert r.links == ["운하"]
+    Graph.cached(path, "b", build)
+    assert len(built) == 2
+
+
 def test_pockets_of_water_cut_off_from_the_open_sea_are_dropped():
     # A lagoon inside a ring of land is split into small water cells that connect only to each other.
     ring = shapely.box(0.1, 0.1, 0.9, 0.9).difference(shapely.box(0.3, 0.3, 0.7, 0.7))
