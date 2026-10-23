@@ -66,3 +66,13 @@ def test_moves_over_a_bank_are_left_out(gebco):
     graph = Graph.build(LandOrShallow(Land([]), Bathymetry(gebco)), lat_limits=(0, 1))
     r = astar(graph, graph.nearest(0.5, 0.0), graph.nearest(0.5, 1.0))
     assert not ((r.lat > 0.25) & (r.lat < 0.75) & (r.lon > 0.25) & (r.lon < 0.75)).any()
+
+
+def test_water_near_an_exempt_point_is_not_shallow(gebco):
+    from shiprouting.sea.depth import Bathymetry, LandOrShallow, summary
+
+    b = Bathymetry(gebco)
+    near = LandOrShallow(Land([]), b, exempt=[(0.5, 0.5)], exempt_km=30)
+    assert near.contains([0.5, 0.5], [0.5, 179.9]).tolist() == [False, True]
+    s = summary(b, [0.5, 0.5], [0.0, 1.0], exempt=[(0.5, 0.5)], exempt_km=30)
+    assert s["shallow_legs"] == 0 and s["least_m"] == 40
