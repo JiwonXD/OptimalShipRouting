@@ -22,10 +22,11 @@ def coarse_tables(monkeypatch):
         lambda cls, sk, speed, s=1.0, T01=None, angle=None: build(cls, sk, speed, s, (7.0, 9.0), (0.0, math.pi / 2, math.pi))))
 
 
-def plan(deadline_hours, speeds=(12, 16, 20)):
+def plan(deadline_hours, speeds=(12, 16, 20), via=()):
     fc = forecast(wind_u=-10.0, Hs=2.0, wave_from_x=1.0, T_m10=8.0)
     fc.fields["wind_u"][1] = 10.0
-    return plan_module.plan(GRAPH, KCS_SHIP, fc, START, GOAL, T0, T0 + np.timedelta64(int(deadline_hours * 3600), "s"), speeds)
+    return plan_module.plan(GRAPH, KCS_SHIP, fc, START, GOAL, T0, T0 + np.timedelta64(int(deadline_hours * 3600), "s"), speeds,
+                            via=via)
 
 
 def test_both_routes_arrive_by_the_deadline_and_the_least_fuel_one_takes_no_more():
@@ -46,3 +47,17 @@ def test_a_far_deadline_sails_the_shortest_route_at_the_slowest_speed():
     out = plan(200.0)
     assert out["shortest"]["speeds_kn"] == {"12": len(out["shortest"]["lat"]) - 1}
     assert out["shortest"]["hours"] < 200.0
+
+
+def test_both_routes_pass_the_waypoints_in_order_and_arrive_by_the_deadline():
+    via = [(4.5, 152.5), (-3.5, 154.5)]
+    out = plan(70.0, via=via)
+    for key in ("shortest", "least_fuel"):
+        r = out[key]
+        at = [int(np.argmin(np.hypot(np.subtract(r["lat"], p[0]), np.subtract(r["lon"], p[1])))) for p in via]
+        assert at[0] < at[1]
+        assert [(r["lat"][k], r["lon"][k]) for k in at] == [pytest.approx(p) for p in via]
+    assert out["shortest"]["hours"] == pytest.approx(70.0, abs=0.1)
+    assert out["least_fuel"]["hours"] <= 70.0 + 0.05
+    assert out["least_fuel"]["fuel_t"] <= out["shortest"]["fuel_t"]
+    assert out["shortest"]["km"] > plan(70.0)["shortest"]["km"] + 500  # the detour is sailed
