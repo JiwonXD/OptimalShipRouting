@@ -69,7 +69,8 @@ def chain(name: str, ways: list[dict], a: tuple[float, float], b: tuple[float, f
     while parent[path[-1]] is not None:
         path.append(parent[path[-1]])
     lat, lon = np.array([pos[n] for n in reversed(path)]).T
-    return Link(name, lat, lon)
+    moves = np.r_[True, (np.diff(lat) != 0) | (np.diff(lon) != 0)]  # OSM can put two nodes on one spot
+    return Link(name, lat[moves], lon[moves])
 
 
 def load_links(osm_dir) -> list[Link]:

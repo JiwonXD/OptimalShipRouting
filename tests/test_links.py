@@ -25,6 +25,12 @@ def test_chain_follows_shared_nodes_between_the_nearest_ends():
     assert link.km == pytest.approx(2 * haversine_km(0, 0, 0, 1) + haversine_km(0, 2, 1, 2))
 
 
+def test_chain_drops_a_second_node_on_the_same_spot():
+    ways = [way([1, 2, 3, 4], [(0.0, 0.0), (0.0, 1.0), (0.0, 1.0), (0.0, 2.0)])]
+    link = chain("운하", ways, (0.0, 0.0), (0.0, 2.0))
+    assert link.lon.tolist() == [0.0, 1.0, 2.0]
+
+
 def test_chain_fails_when_the_ways_do_not_connect():
     ways = [way([1, 2], [(0.0, 0.0), (0.0, 1.0)]), way([3, 4], [(0.0, 2.0), (0.0, 3.0)])]
     with pytest.raises(ValueError):

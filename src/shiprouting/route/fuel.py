@@ -163,11 +163,11 @@ def fuel_kg(costs: list[FuelCost], args: tuple, lat_a, lon_a, lat_b, lon_b, hour
         c.seconds += seconds
     return out.reshape(len(costs), *shape)
 
-def run(graph: Graph, ship: Ship, forecast: Forecast, speed_kn: float, max_seconds: float) -> list[dict]:
+def run(graph: Graph, ship: Ship, forecast: Forecast, speed_kn: float, max_seconds: float, land=None) -> list[dict]:
     """The shortest route, the fuel-optimal route in frozen weather and the one in moving weather,
-    each costed in both kinds of weather."""
-    from shiprouting.sea.latlon import ROUTES
-    from shiprouting.sea.quadtree import astar
+    each costed in both kinds of weather. Given the land, each also with its sharp turns smoothed out."""
+    from shiprouting.sea.latlon import ROUTES, turn_deg
+    from shiprouting.sea.quadtree import astar, smooth_turns
 
     departure = forecast.time[0]
     t0 = time.perf_counter()
@@ -191,6 +191,8 @@ def run(graph: Graph, ship: Ship, forecast: Forecast, speed_kn: float, max_secon
             found["moving"] = astar(graph, s, g, moving.costs(graph), moving.link_cost, lambda n: 0.0, max_seconds)
         except TimeoutError as e:
             row["moving_error"] = str(e)
+        if land is not None:
+            found |= {f"{key}_smoothed": smooth_turns(land, r) for key, r in found.items()}
         for key, r in found.items():
             before = moving.beyond_forecast
             fuel_moving = moving.path(r.lat, r.lon, r.on_link)
@@ -200,6 +202,7 @@ def run(graph: Graph, ship: Ship, forecast: Forecast, speed_kn: float, max_secon
                 "fuel_frozen_t": round(frozen.path(r.lat, r.lon, r.on_link) / 1000, 2),
                 "fuel_moving_t": round(fuel_moving / 1000, 2),
                 "moves_after_forecast": f"{moving.beyond_forecast - before}/{int((~r.on_link).sum())}",
+                "turns_over_60": int((turn_deg(r.lat, r.lon) >= 60).sum()),
                 "expanded": r.expanded,
                 "seconds": round(r.seconds, 1),
                 "links": r.links,
@@ -240,7 +243,7 @@ def main() -> None:
     graph = Graph.build(land, min_step=args.min_step, links=links)
     print(f"graph: {len(graph.lat)} cells, built in {time.perf_counter() - t0:.0f} s", flush=True)
     forecast = ecmwf.load(sorted(glob.glob(args.forecast)))
-    rows = run(graph, KCS_SHIP, forecast, args.speed_kn, args.max_seconds)
+    rows = run(graph, KCS_SHIP, forecast, args.speed_kn, args.max_seconds, land)
     with open(args.out, "w", encoding="utf-8") as f:
         json.dump(rows, f, ensure_ascii=False)
 

@@ -122,3 +122,32 @@ def test_arcs_can_be_required_to_keep_clear_of_land():
     assert not arcs_on_land(island, 0.105, 9.0, 0.105, 11.0).any()
     assert not arcs_on_land(island, 0.105, 9.0, 0.105, 11.0, clearance_km=0.3).any()
     assert arcs_on_land(island, 0.105, 9.0, 0.105, 11.0, clearance_km=1.0).all()
+
+
+def path(points, on_link=None):
+    from shiprouting.sea.latlon import SearchResult
+
+    lat, lon = (np.array(v, float) for v in zip(*points))
+    on_link = np.zeros(len(lat) - 1, bool) if on_link is None else np.array(on_link)
+    return SearchResult(lat, lon, on_link, [], float(haversine_km(lat[:-1], lon[:-1], lat[1:], lon[1:]).sum()), 0, 0.0)
+
+
+def test_a_spike_is_smoothed_out():
+    from shiprouting.sea.latlon import turn_deg
+    from shiprouting.sea.quadtree import smooth_turns
+
+    r = path([(0, 0), (0, 1), (0.3, 1.05), (0, 1.1), (0, 2)])  # a 0.3° detour north and straight back
+    s = smooth_turns(Land([]), r)
+    assert (turn_deg(s.lat, s.lon) < 60).all()
+    assert s.lat.tolist() == [0, 0, 0, 0] and s.lon == pytest.approx([0, 1, 1.1, 2])
+    assert s.km < r.km
+
+
+def test_a_turn_round_land_stays_and_links_are_kept():
+    from shiprouting.sea.quadtree import smooth_turns
+
+    corner = Land([shapely.box(0.2, 0.2, 2.0, 2.0)])
+    r = path([(0, 0), (0, 1), (1, 1.1), (0, 1.2), (0, 2)], on_link=[False, True, True, False])  # the spike is a link's
+    assert smooth_turns(Land([]), r).lat.tolist() == r.lat.tolist()
+    r = path([(0, 1), (0, 0.1), (1, 0.1)])  # round the corner of the land
+    assert len(smooth_turns(corner, r).lat) == 3
