@@ -11,7 +11,7 @@ Reading needs the optional ``eccodes`` package and downloading needs
 """
 
 import math
-from datetime import datetime
+from datetime import datetime, timedelta
 from pathlib import Path
 
 import numpy as np
@@ -31,17 +31,24 @@ NAMES = {
 }
 
 
-def download(run: datetime, steps, target_dir, resol: str = "0p25") -> list[Path]:
-    """Download the PARAMS of forecast ``run`` (UTC) at ``steps`` (hours), one file per stream and step."""
+def download(run: datetime, steps, target_dir, resol: str = "0p25", source: str = "ecmwf") -> list[Path]:
+    """Download the PARAMS of forecast ``run`` (UTC) at ``steps`` (hours), one file per stream and step.
+
+    source "ecmwf" keeps only the last few days of runs; the cloud mirrors ("aws", "google",
+    "azure") keep older ones. Files already there are kept, so an interrupted download resumes.
+    """
     from ecmwf.opendata import Client
 
-    client = Client(source="ecmwf", resol=resol)
+    client = Client(source=source, resol=resol)
     target_dir = Path(target_dir)
     target_dir.mkdir(parents=True, exist_ok=True)
     paths = []
     for stream, params in PARAMS.items():
         for step in steps:
             path = target_dir / f"ifs{resol}_{run:%Y%m%dT%H}z_{stream}_step{step:03d}.grib2"
+            paths.append(path)
+            if path.exists() and path.stat().st_size > 0:
+                continue
             client.retrieve(
                 date=run.strftime("%Y%m%d"),
                 time=run.hour,
@@ -51,7 +58,6 @@ def download(run: datetime, steps, target_dir, resol: str = "0p25") -> list[Path
                 param=list(params),
                 target=str(path),
             )
-            paths.append(path)
     return paths
 
 
@@ -128,3 +134,25 @@ def _read_grid(eccodes, h):
     order_lat = np.argsort(lat)
     order_lon = np.argsort(lon)
     return lat[order_lat], lon[order_lon], values[np.ix_(order_lat, order_lon)]
+
+
+def main() -> None:
+    import argparse
+
+    parser = argparse.ArgumentParser(description="Download an ECMWF open data run, or the first hours of daily runs.")
+    parser.add_argument("run", help="the (first) run, YYYYMMDDHH UTC")
+    parser.add_argument("target", help="folder for the GRIB2 files")
+    parser.add_argument("--days", type=int, default=0, help="instead of the whole run, steps 0-21 h of this many daily runs from `run` on")
+    parser.add_argument("--source", default="ecmwf", help="ecmwf (last few days), or aws, google or azure (older runs)")
+    args = parser.parse_args()
+
+    run = datetime.strptime(args.run, "%Y%m%d%H")
+    if args.days:
+        for day in range(args.days):
+            download(run + timedelta(days=day), range(0, 24, 3), args.target, source=args.source)
+    else:
+        download(run, [*range(0, 144, 3), *range(144, 361, 6)], args.target, source=args.source)
+
+
+if __name__ == "__main__":
+    main()
