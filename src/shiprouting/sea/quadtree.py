@@ -242,8 +242,9 @@ def smooth_turns(land: Land, r: SearchResult, sharp: float = 60.0, reach: int = 
 
     The sharpest such point goes first: it and up to reach - 1 neighbours are dropped, the
     fewest that leave a great-circle leg clear of land. Points on links and the two ends
-    stay. Repeats until no sharp point can be dropped. Unlike straighten, the path stays
-    close to the one found, so a route chosen for its weather keeps its way.
+    stay. Repeats until no sharp point can be dropped, then cuts the corners that are left
+    (cut_corners). Unlike straighten, the path stays close to the one found, so a route
+    chosen for its weather keeps its way.
     """
     t0 = time.perf_counter()
     lat, lon = r.lat, np.degrees(np.unwrap(np.radians(r.lon)))
@@ -272,11 +273,50 @@ def smooth_turns(land: Land, r: SearchResult, sharp: float = 60.0, reach: int = 
         else:
             stuck.add(idx[k])
     idx = np.nonzero(keep)[0]
-    lat, lon = lat[idx], (lon[idx] + 180) % 360 - 180
     seg_link = on_link[idx[:-1]] & (np.diff(idx) == 1)
-    km = float(haversine_km(lat[:-1], lon[:-1], lat[1:], lon[1:]).sum())
     clock = None if r.clock is None else r.clock[idx]
+    lat, lon, seg_link, clock = cut_corners(land, lat[idx], lon[idx], fixed[idx], seg_link, clock, sharp)
+    lon = (lon + 180) % 360 - 180
+    km = float(haversine_km(lat[:-1], lon[:-1], lat[1:], lon[1:]).sum())
     return SearchResult(lat, lon, seg_link, r.links, km, r.expanded, time.perf_counter() - t0, r.cost, clock)
+
+
+def cut_corners(land: Land, lat, lon, fixed, seg_link, clock, sharp: float = 60.0, fractions=(0.5, 0.25, 0.1)):
+    """Cut off the corners that still turn by `sharp` degrees or more.
+
+    A corner P between A and B gives way to two points the same distance d from P, one
+    towards A and one towards B, with d the largest of `fractions` times the shorter leg
+    whose new leg is clear of land. The turn is split in two halves, so a corner of 120°
+    or more is cut again. Fixed points stay; lon is unwrapped and stays so. The clock of a
+    new point is read off its leg by distance.
+    """
+    lat, lon, fixed = np.asarray(lat, float), np.asarray(lon, float), np.asarray(fixed, bool)
+    stuck = np.zeros(len(lat), bool)
+    for _ in range(4 * len(lat)):
+        turn = turn_deg(lat, lon)
+        order = [k + 1 for k in np.argsort(-turn) if turn[k] >= sharp and not fixed[k + 1] and not stuck[k + 1]]
+        if not order:
+            break
+        k = order[0]
+        legs = haversine_km(lat[k], lon[k], lat[[k - 1, k + 1]], lon[[k - 1, k + 1]])
+        d = np.array(fractions) * legs.min()
+        fa, fb = d / legs[0], d / legs[1]
+        a_lat, a_lon = along(*np.broadcast_arrays(lat[k], lon[k], lat[k - 1], lon[k - 1], fa))
+        b_lat, b_lon = along(*np.broadcast_arrays(lat[k], lon[k], lat[k + 1], lon[k + 1], fb))
+        a_lon, b_lon = (lon[k] + (v - lon[k] + 180) % 360 - 180 for v in (a_lon, b_lon))
+        clear = ~arcs_on_land(land, a_lat, a_lon, b_lat, b_lon)
+        if not clear.any():
+            stuck[k] = True
+            continue
+        j = int(np.argmax(clear))
+        lat = np.r_[lat[:k], a_lat[j], b_lat[j], lat[k + 1:]]
+        lon = np.r_[lon[:k], a_lon[j], b_lon[j], lon[k + 1:]]
+        fixed, stuck = (np.r_[v[:k], False, False, v[k + 1:]] for v in (fixed, stuck))
+        seg_link = np.r_[seg_link[:k], False, seg_link[k:]]
+        if clock is not None:
+            ca, cb = (clock[k] + f[j] * (clock[n] - clock[k]) for f, n in ((fa, k - 1), (fb, k + 1)))
+            clock = np.r_[clock[:k], ca, cb, clock[k + 1:]]
+    return lat, lon, seg_link, clock
 
 def arcs_on_land(land: Land, lat0, lon0, lat1, lon1, piece_km: float = 20.0, clearance_km: float = 0.0) -> np.ndarray:
     """Whether each great-circle arc from (lat0, lon0) to (lat1, lon1) comes within clearance_km of land.

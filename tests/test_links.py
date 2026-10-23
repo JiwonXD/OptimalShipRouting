@@ -31,6 +31,12 @@ def test_chain_drops_a_second_node_on_the_same_spot():
     assert link.lon.tolist() == [0.0, 1.0, 2.0]
 
 
+def test_chain_drops_a_node_metres_from_the_one_before():
+    ways = [way([1, 2, 3, 4], [(0.0, 0.0), (0.0, 1.0), (0.0001, 1.0001), (0.0, 2.0)])]  # about 16 m apart
+    link = chain("운하", ways, (0.0, 0.0), (0.0, 2.0))
+    assert link.lon.tolist() == [0.0, 1.0, 2.0]
+
+
 def test_chain_fails_when_the_ways_do_not_connect():
     ways = [way([1, 2], [(0.0, 0.0), (0.0, 1.0)]), way([3, 4], [(0.0, 2.0), (0.0, 3.0)])]
     with pytest.raises(ValueError):

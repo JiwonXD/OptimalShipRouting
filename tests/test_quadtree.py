@@ -1,3 +1,5 @@
+import dataclasses
+
 import numpy as np
 import pytest
 import shapely
@@ -143,11 +145,33 @@ def test_a_spike_is_smoothed_out():
     assert s.km < r.km
 
 
-def test_a_turn_round_land_stays_and_links_are_kept():
+def test_a_links_turns_are_kept():
     from shiprouting.sea.quadtree import smooth_turns
 
-    corner = Land([shapely.box(0.2, 0.2, 2.0, 2.0)])
     r = path([(0, 0), (0, 1), (1, 1.1), (0, 1.2), (0, 2)], on_link=[False, True, True, False])  # the spike is a link's
     assert smooth_turns(Land([]), r).lat.tolist() == r.lat.tolist()
-    r = path([(0, 1), (0, 0.1), (1, 0.1)])  # round the corner of the land
-    assert len(smooth_turns(corner, r).lat) == 3
+
+
+def test_a_corner_that_cannot_be_dropped_is_cut():
+    from shiprouting.sea.latlon import turn_deg
+    from shiprouting.sea.quadtree import arcs_on_land, smooth_turns
+
+    corner = Land([shapely.box(0.2, 0.2, 2.0, 2.0)])
+    r = path([(0, 1), (0, 0.1), (1, 0.1)])  # 90° round the corner of the land
+    r = dataclasses.replace(r, clock=np.array([0.0, 10.0, 20.0]))
+    s = smooth_turns(corner, r)
+    assert (turn_deg(s.lat, s.lon) < 60).all()
+    assert not arcs_on_land(corner, s.lat[:-1], s.lon[:-1], s.lat[1:], s.lon[1:]).any()
+    assert [s.lat[0], s.lon[0], s.lat[-1], s.lon[-1]] == pytest.approx([0, 1, 1, 0.1]) and s.km < r.km
+    assert len(s.clock) == len(s.lat) and (np.diff(s.clock) > 0).all() and s.clock[[0, -1]].tolist() == [0, 20]
+
+
+def test_a_v_shaped_corner_is_cut_twice():
+    from shiprouting.sea.latlon import turn_deg
+    from shiprouting.sea.quadtree import smooth_turns
+
+    wall = Land([shapely.box(0.99, 0.3, 1.01, 2.0)])  # the corner can't be dropped: the wall is in the way
+    r = path([(1, 0.9), (0, 1), (1, 1.1)])  # turns by about 168°
+    s = smooth_turns(wall, r)
+    assert len(s.lat) >= 5
+    assert (turn_deg(s.lat, s.lon) < 60).all()
