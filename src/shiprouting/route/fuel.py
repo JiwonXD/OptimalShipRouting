@@ -235,7 +235,7 @@ def main() -> None:
     parser.add_argument("--min-depth", type=float, default=15.0)
     parser.add_argument("--depth-check", choices=["centre", "lines"], default="lines",
                         help="check only cell centres, or also every move and smoothed leg")
-    parser.add_argument("--link-approach-km", type=float, default=0.0, help="no depth check this close to a link's sea end")
+    parser.add_argument("--link-approach-km", type=float, default=10.0, help="no depth check this close to a link's sea end")
     args = parser.parse_args()
 
     land = load_osm_land_polygons(args.land)
