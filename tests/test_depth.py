@@ -46,3 +46,23 @@ def test_cells_over_shallow_water_are_left_out_of_the_graph(gebco):
     deep = Graph.build(Land([]), lat_limits=(0, 1))
     assert len(deep.lat) - len(graph.lat) == 4 + 4  # the bank and the column by the dateline
     assert not ((np.abs(graph.lat - 0.5) < 0.2) & (np.abs(graph.lon - 0.5) < 0.2)).any()
+
+
+def test_a_line_over_a_bank_counts_as_crossing_land(gebco):
+    import shapely
+
+    from shiprouting.sea.depth import Bathymetry, LandOrShallow
+
+    obstacles = LandOrShallow(Land([]), Bathymetry(gebco), chunk=50)
+    lines = shapely.linestrings([[[0.0, 0.5], [1.0, 0.5]], [[0.0, 1.5], [1.0, 1.5]], [[179.0, 0.5], [181.0, 0.5]]])
+    assert obstacles.crosses(lines).tolist() == [True, False, True]  # the last one runs past the dateline into 5 m
+    assert obstacles.contains([0.5, 1.5], [0.5, 0.5]).tolist() == [True, False]
+
+
+def test_moves_over_a_bank_are_left_out(gebco):
+    from shiprouting.sea.depth import Bathymetry, LandOrShallow
+    from shiprouting.sea.quadtree import Graph, astar
+
+    graph = Graph.build(LandOrShallow(Land([]), Bathymetry(gebco)), lat_limits=(0, 1))
+    r = astar(graph, graph.nearest(0.5, 0.0), graph.nearest(0.5, 1.0))
+    assert not ((r.lat > 0.25) & (r.lat < 0.75) & (r.lon > 0.25) & (r.lon < 0.75)).any()

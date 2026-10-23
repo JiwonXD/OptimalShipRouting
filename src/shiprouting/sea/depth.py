@@ -7,6 +7,7 @@ array is stored contiguously, so it is mapped from disk rather than read: the
 """
 
 import numpy as np
+import shapely
 
 from shiprouting.sea.latlon import haversine_km
 from shiprouting.sea.quadtree import along
@@ -31,6 +32,48 @@ class Bathymetry:
         i = np.floor((np.asarray(lat, float) - self.lat0) / self.step + 0.5).astype(int)
         j = np.floor((np.asarray(lon, float) - self.lon0) / self.step + 0.5).astype(int) % self.z.shape[1]
         return np.asarray(self.z[np.clip(i, 0, self.z.shape[0] - 1), j])
+
+
+class LandOrShallow:
+    """Land, and water min_depth m deep or less, behind the queries Land answers.
+
+    A line is checked against the depth every half grid step along it (a straight
+    lon/lat line, as Land checks it). Splitting the coast into small cells still
+    follows the land alone (tree, fraction).
+    """
+
+    def __init__(self, land, bathy: Bathymetry, min_depth: float = 15.0, chunk: int = 2_000_000):
+        self.land, self.bathy, self.min_depth, self.chunk = land, bathy, min_depth, chunk
+        self.tree, self.fraction = land.tree, land.fraction
+
+    def shallow(self, lat, lon) -> np.ndarray:
+        return -self.bathy.elevation(lat, lon) <= self.min_depth
+
+    def contains(self, lat, lon) -> np.ndarray:
+        return self.land.contains(lat, lon) | self.shallow(lat, lon)
+
+    def crosses(self, lines) -> np.ndarray:
+        return self.land.crosses(lines) | self.over_shallow(lines)
+
+    def near(self, geoms, distance) -> np.ndarray:
+        return self.land.near(geoms, distance) | self.over_shallow(geoms)
+
+    def over_shallow(self, lines) -> np.ndarray:
+        """Whether each two-point line passes over shallow water."""
+        lines = np.asarray(lines, dtype=object)
+        xy = shapely.get_coordinates(lines).reshape(-1, 2, 2)
+        n = np.ceil(np.abs(xy[:, 1] - xy[:, 0]).max(axis=1) / (self.bathy.step / 2)).astype(int) + 1
+        hit = np.zeros(len(n), bool)
+        first = 0
+        while first < len(n):  # lines in chunks of about self.chunk samples
+            last = first + max(1, int(np.searchsorted(np.cumsum(n[first:]), self.chunk)))
+            m = n[first:last]
+            line = np.repeat(np.arange(first, last), m)
+            f = (np.arange(len(line)) - np.repeat(np.cumsum(m) - m, m)) / np.repeat(np.maximum(m - 1, 1), m)
+            p = xy[line, 0] + f[:, None] * (xy[line, 1] - xy[line, 0])
+            hit[first:last] = np.bincount(line - first, weights=self.shallow(p[:, 1], p[:, 0]), minlength=last - first) > 0
+            first = last
+        return hit.reshape(lines.shape)
 
 
 def shallowest(bathy: Bathymetry, lat, lon, piece_km: float = 0.25):

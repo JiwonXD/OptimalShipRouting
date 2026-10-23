@@ -231,8 +231,10 @@ def main() -> None:
     parser.add_argument("--links", help="folder with the Overpass canal and strait files (see links.LINKS)")
     parser.add_argument("--speed-kn", type=float, default=16.0)
     parser.add_argument("--max-seconds", type=float, default=600.0, help="give up a moving-weather search after this long")
-    parser.add_argument("--bathymetry", help="GEBCO grid, netCDF: leave out cells whose centre is --min-depth m deep or less")
+    parser.add_argument("--bathymetry", help="GEBCO grid, netCDF: keep out of water --min-depth m deep or less")
     parser.add_argument("--min-depth", type=float, default=15.0)
+    parser.add_argument("--depth-check", choices=["centre", "lines"], default="lines",
+                        help="check only cell centres, or also every move and smoothed leg")
     args = parser.parse_args()
 
     land = load_osm_land_polygons(args.land)
@@ -244,9 +246,11 @@ def main() -> None:
     t0 = time.perf_counter()
     bathymetry = None
     if args.bathymetry:
-        from shiprouting.sea.depth import Bathymetry
+        from shiprouting.sea.depth import Bathymetry, LandOrShallow
 
         bathymetry = Bathymetry(args.bathymetry)
+        if args.depth_check == "lines":
+            land, bathymetry = LandOrShallow(land, bathymetry, args.min_depth), None
     graph = Graph.build(land, min_step=args.min_step, links=links, bathymetry=bathymetry, min_depth=args.min_depth)
     print(f"graph: {len(graph.lat)} cells, {len(graph.links)} links, built in {time.perf_counter() - t0:.0f} s", flush=True)
     forecast = ecmwf.load(sorted(glob.glob(args.forecast)))
