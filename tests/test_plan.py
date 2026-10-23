@@ -83,7 +83,7 @@ def test_against_a_current_the_shortest_route_speeds_up_to_keep_the_deadline():
     deadline = T0 + np.timedelta64(30 * 3600, "s")
     out = plan_module.plan(GRAPH, KCS_SHIP, fc, START, GOAL, T0, deadline, (12, 16, 20))
     still = plan_module.plan(GRAPH, KCS_SHIP, fc, START, GOAL, T0, deadline, (12, 16, 20), currents=False)
-    assert out["shortest"]["hours"] == pytest.approx(30.0, rel=0.002)
+    assert 30.0 * (1 - 0.002) <= out["shortest"]["hours"] <= 30.0  # just before the deadline, never after
     assert float(next(iter(out["shortest"]["speeds_kn"]))) > float(next(iter(still["shortest"]["speeds_kn"]))) + 1.5
     assert out["least_fuel"]["hours"] <= 30.0 + 0.05
     assert out["least_fuel"]["fuel_t"] <= out["shortest"]["fuel_t"]

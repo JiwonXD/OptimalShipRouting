@@ -79,11 +79,11 @@ def plan(graph: Graph, ship: Ship, forecast: Forecast, start, goal, departure, d
         out["error"] = f"the deadline cannot be met: the shortest route ({r.km:.0f} km) needs {need_kn:.1f} kn"
         return out
     kn = max(need_kn, min(speeds_kn))
-    for _ in range(4):  # the current makes it arrive early or late: adjust the speed to that
+    for _ in range(6):  # the current makes it arrive early or late: adjust the speed to arrive just before the deadline
         fuel, clock = cost(kn).sail(r.lat, r.lon, r.on_link)
-        if abs(clock[-1] - hours) <= 0.002 * hours or (kn == min(speeds_kn) and clock[-1] < hours):
+        if hours * (1 - 0.002) <= clock[-1] <= hours or (kn == min(speeds_kn) and clock[-1] < hours):
             break
-        kn = max(round(kn * clock[-1] / hours, 2), min(speeds_kn))
+        kn = max(round(kn * clock[-1] / (hours * (1 - 0.001)), 2), min(speeds_kn))
     if kn > max(speeds_kn):
         out["error"] = f"the deadline cannot be met: the shortest route ({r.km:.0f} km) needs {kn:.1f} kn with the current"
         return out

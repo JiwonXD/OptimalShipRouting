@@ -105,7 +105,9 @@ class SpeedChoice:
     def fill_slack(self, r: SearchResult, eta_hours: float, rounds: int = 20) -> SearchResult:
         """Spend the time a found path leaves before eta_hours: step segments down to the next
         slower speed, those saving the most fuel per extra hour first. Each round re-sails the
-        whole path at its new times and stops when that no longer saves fuel or arrives late."""
+        whole path at its new times. With the current, slowing down shifts the later segments in
+        time, so they may take longer than foreseen: if the path then arrives late or saves no
+        fuel, the round is tried again with half as many segments, down to none."""
         seg = np.arange(len(r.lat) - 1)
         k = self.speed_index(r)
         clock, kg, h = self.sail(r, k)
@@ -117,13 +119,15 @@ class SpeedChoice:
             worth = np.nonzero((k > 0) & (saving > 0) & (extra > 0))[0]
             worth = worth[np.argsort(-saving[worth] / extra[worth])]
             take = worth[np.cumsum(extra[worth]) <= eta_hours - (clock[-1] - clock[0])]
+            while len(take):
+                k2 = k.copy()
+                k2[take] -= 1
+                clock2, kg2, h2 = self.sail(r, k2)
+                fuel2 = kg2[k2, seg].sum()
+                if fuel2 < fuel and clock2[-1] - clock2[0] <= eta_hours * (1 + 1e-9):
+                    break
+                take = take[: len(take) // 2]
             if len(take) == 0:
-                break
-            k2 = k.copy()
-            k2[take] -= 1
-            clock2, kg2, h2 = self.sail(r, k2)
-            fuel2 = kg2[k2, seg].sum()
-            if fuel2 >= fuel or clock2[-1] - clock2[0] > eta_hours * (1 + 1e-9):
                 break
             k, clock, kg, h, fuel = k2, clock2, kg2, h2, fuel2
         return dataclasses.replace(r, clock=clock, cost=float(fuel))
