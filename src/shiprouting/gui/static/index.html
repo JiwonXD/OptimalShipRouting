@@ -266,7 +266,7 @@ fetch("/api/info").then(r => r.json()).then(info => {
   const departure = document.getElementById("departure");
   departure.value = departure.min = iso(info.forecast_start);
   departure.max = iso(info.forecast_end);
-  document.getElementById("deadline").value = iso(new Date(start.getTime() + 15 * 86400e3).toISOString());
+  document.getElementById("deadline").value = iso(new Date(start.getTime() + 30 * 86400e3).toISOString());  // long enough for Europe at about 15 kn
   document.getElementById("forecast").textContent = `예보 ${iso(info.forecast_start)} ~ ${iso(info.forecast_end)}` +
     (info.runs ? ` (매일 00시 회차 ${info.runs}개, 출발 직전에 나온 회차로 계산)` : "");
 });
