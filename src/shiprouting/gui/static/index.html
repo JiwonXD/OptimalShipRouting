@@ -73,10 +73,12 @@ const routes = L.layerGroup().addTo(map);
 function drawPoints() {
   markers.clearLayers();
   const list = [];
-  // Drawn on the copy of the world nearest the start (or the view), where the routes are drawn too.
-  const ref = points.start ? points.start[1] : map.getCenter().lng;
+  // Each within 180° of the point before (start, waypoints, goal), like the routes (unwrap), so
+  // both are drawn on the same copy of the world.
+  let ref = points.start ? points.start[1] : map.getCenter().lng;
   const add = (p, label, color) => {
     const lon = p[1] + 360 * Math.round((ref - p[1]) / 360);
+    ref = lon;
     L.circleMarker([p[0], lon], { radius: 6, color, fillOpacity: 1, pane: "points" }).bindTooltip(label).addTo(markers);
     list.push(`${label}: ${p[0].toFixed(2)}, ${p[1].toFixed(2)}`);
   };
@@ -139,6 +141,8 @@ function show(out) {
     L.polyline(unwrap(out.least_fuel.lat, out.least_fuel.lon), { color: LEAST, weight: 3 }).addTo(routes);
     parts.push(row("최적", LEAST, out.least_fuel));
   }
+  const drawn = routes.getLayers();
+  if (drawn.length) map.fitBounds(L.featureGroup(drawn).getBounds(), { padding: [30, 30] });
   let html = parts.filter(p => p.startsWith("<p")).join("");
   const rows = parts.filter(p => !p.startsWith("<p")).join("");
   if (rows) html += `<table><tr><th></th><th>거리</th><th>시간</th><th>연료</th></tr>${rows}</table>`;
