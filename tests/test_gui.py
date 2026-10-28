@@ -1,6 +1,7 @@
 import json
 import threading
 import time
+import types
 import urllib.error
 import urllib.request
 from http.server import ThreadingHTTPServer
@@ -44,10 +45,13 @@ def test_a_failed_search_reports_its_error():
 
 def test_the_planner_returns_the_routes_the_page_draws():
     fc = forecast(wind_u=-10.0, Hs=2.0, wave_from_x=1.0, T_m10=8.0)
-    run = planner(GRAPH, LAND, fc, KCS_SHIP)
+    asked = []
+    runs = types.SimpleNamespace(newest=lambda t: (asked.append(t), (T0 - np.timedelta64(8, "h"), fc))[1])
+    run = planner(GRAPH, LAND, runs, KCS_SHIP)
     request = {"start": START, "goal": GOAL, "departure": str(T0), "deadline": str(T0 + np.timedelta64(40, "h"))}
     shortest = run(request | {"kind": "shortest"})
     assert "least_fuel" not in shortest and set(shortest["shortest"]) >= {"km", "hours", "fuel_t", "lat", "lon"}
+    assert asked == [T0] and shortest["run"] == str(T0 - np.timedelta64(8, "h"))  # the run out by the departure
     both = run(request | {"kind": "least_fuel"})
     assert both["least_fuel"]["fuel_t"] <= both["shortest"]["fuel_t"] and "tries" not in both
 

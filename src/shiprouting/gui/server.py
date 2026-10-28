@@ -1,9 +1,11 @@
 """A map in the browser to plan one voyage: click the start, the goal and any waypoints, then
 find the shortest route or the least-fuel one (route.plan) and see both drawn.
 
-Serves on localhost. The sea graph and the forecast are loaded once at start. A search takes
-minutes and most of the memory, so one runs at a time, in a thread the page polls for the
-lines it prints and, at the end, the plan.
+Serves on localhost. The sea graph is loaded once at start. Each search plans on the newest
+forecast run out by the departure (voyage.Runs: a run is out some hours after it starts),
+loaded when first needed and kept until another is. A search takes minutes and most of
+the memory, so one runs at a time, in a thread the page polls for the lines it prints and,
+at the end, the plan.
 """
 
 import contextlib
@@ -65,12 +67,17 @@ class Jobs:
         return self.jobs.get(key)
 
 
-def planner(graph, land, forecast, ship, tables: str | None = None):
+def planner(graph, land, runs, ship, tables: str | None = None):
     """run for Jobs: a request {start, goal, via, departure, deadline, kind: "shortest" | "least_fuel"}
-    planned with route.plan, the routes cut down to what the page draws."""
+    planned with route.plan on runs.newest(departure), the routes cut down to what the page draws."""
+    import numpy as np
+
     from shiprouting.route.plan import plan
 
     def run(request: dict) -> dict:
+        t0 = time.perf_counter()
+        at, forecast = runs.newest(np.datetime64(request["departure"], "s"))
+        print(f"forecast run {at} ready in {time.perf_counter() - t0:.0f} s", flush=True)
         out = plan(graph, ship, forecast, tuple(request["start"]), tuple(request["goal"]), request["departure"],
                    request["deadline"], tables=tables, via=[tuple(p) for p in request.get("via", [])], land=land,
                    least_fuel=request["kind"] == "least_fuel")
@@ -78,6 +85,7 @@ def planner(graph, land, forecast, ship, tables: str | None = None):
             if key in out:
                 out[key] = {k: out[key][k] for k in ROUTE_KEYS}
         out.pop("tries", None)
+        out["run"] = str(at)
         return out
 
     return run
@@ -123,24 +131,30 @@ def handler(jobs: Jobs, info: dict):
 
 def main() -> None:
     import argparse
-    import glob
+    import os
+    import re
 
     from shiprouting.fuel.ships import KCS_SHIP
     from shiprouting.route.plan import add_sea_args, sea_graph
-    from shiprouting.weather import ecmwf
+    from shiprouting.route.voyage import HOUR, Runs
 
     parser = argparse.ArgumentParser(description="Plan a voyage on a map in the browser.")
     parser.add_argument("land", help="land polygons shapefile")
-    parser.add_argument("forecast", help="glob of the ECMWF GRIB2 files")
+    parser.add_argument("runs", help="folder of the ECMWF runs, one folder YYYYMMDDHH of GRIB2 files each")
+    parser.add_argument("--lag-hours", type=float, default=0.0, help="a run is taken as out this long after it starts")
     parser.add_argument("--tables", help="folder the wave added resistance tables are kept in")
     parser.add_argument("--port", type=int, default=8000)
     add_sea_args(parser)
     args = parser.parse_args()
 
     land, graph = sea_graph(args)
-    forecast = ecmwf.load(sorted(glob.glob(args.forecast)))
-    info = {"forecast_start": str(forecast.time[0]), "forecast_end": str(forecast.time[-1])}
-    jobs = Jobs(planner(graph, land, forecast, KCS_SHIP, args.tables))
+    runs = Runs(args.runs, args.lag_hours, name=r"\d{8}00")  # the full 00z runs (15 days each)
+    steps = [int(m.group(1)) for m in (re.search(r"step(\d+)", n) for n in os.listdir(runs.folders[-1])) if m]
+    info = {  # departures there is a run out for, up to the end of the last run
+        "forecast_start": str(runs.times[0] + args.lag_hours * HOUR), "forecast_end": str(runs.times[-1] + max(steps) * HOUR),
+        "runs": len(runs.times), "lag_hours": args.lag_hours,
+    }
+    jobs = Jobs(planner(graph, land, runs, KCS_SHIP, args.tables))
     server = ThreadingHTTPServer(("127.0.0.1", args.port), handler(jobs, info))
     print(f"open http://localhost:{args.port}", flush=True)
     server.serve_forever()

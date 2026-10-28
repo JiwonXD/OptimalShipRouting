@@ -263,9 +263,12 @@ function unwrap(lat, lon) {
 const iso = s => s.slice(0, 16);
 fetch("/api/info").then(r => r.json()).then(info => {
   const start = new Date(info.forecast_start + "Z");
-  document.getElementById("departure").value = iso(info.forecast_start);
+  const departure = document.getElementById("departure");
+  departure.value = departure.min = iso(info.forecast_start);
+  departure.max = iso(info.forecast_end);
   document.getElementById("deadline").value = iso(new Date(start.getTime() + 15 * 86400e3).toISOString());
-  document.getElementById("forecast").textContent = `예보 ${iso(info.forecast_start)} ~ ${iso(info.forecast_end)}`;
+  document.getElementById("forecast").textContent = `예보 ${iso(info.forecast_start)} ~ ${iso(info.forecast_end)}` +
+    (info.runs ? ` (매일 00시 회차 ${info.runs}개, 출발 직전에 나온 회차로 계산)` : "");
 });
 
 function row(name, color, r) {
@@ -294,6 +297,7 @@ function show(out) {
   const rows = parts.filter(p => !p.startsWith("<p")).join("");
   if (rows) html += `<table><tr><th></th><th>거리</th><th>시간</th><th>연료</th></tr>${rows}</table>`;
   if (out.saving_t !== undefined) html += `<p><b>절감 ${out.saving_t.toFixed(2)} t (${out.saving_pct.toFixed(2)}%)</b></p>`;
+  if (out.run) html += `<p style="color:var(--muted)">예보 회차: ${iso(out.run)} 발표</p>`;
   if (out.moved_km && out.moved_km.some(km => km > 1)) html += `<p style="color:var(--muted)">가장 가까운 바다 칸으로 옮김: ${out.moved_km.join(", ")} km</p>`;
   document.getElementById("summary").innerHTML = html;
 }
