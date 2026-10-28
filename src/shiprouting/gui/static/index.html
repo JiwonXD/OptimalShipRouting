@@ -19,8 +19,7 @@
   input[type=datetime-local] { width: 100%; }
   button { width: 100%; padding: 8px; margin: 4px 0; border: 0; border-radius: 6px; color: #fff; font-weight: 600; cursor: pointer; }
   button:disabled { opacity: .5; cursor: default; }
-  #find-shortest { background: var(--shortest); }
-  #find-least { background: var(--least); }
+  #find { background: #1f6feb; }
   #clear { background: #6e7781; }
   #map.leaflet-container { cursor: crosshair; }
   .stop { display: flex; align-items: center; gap: 6px; margin: 4px 0; padding: 2px 4px; border-radius: 6px; }
@@ -65,8 +64,7 @@
     <label>도착 기한 <input type="datetime-local" id="deadline"></label>
     <div id="forecast" style="color: var(--muted)"></div>
   </fieldset>
-  <button id="find-shortest">최단 경로 탐색</button>
-  <button id="find-least">최적 경로 탐색</button>
+  <button id="find" title="최단 경로와 최적 경로를 함께 찾아요">경로 탐색</button>
   <button id="clear">모두 지우기</button>
   <div id="summary"></div>
   <div id="status"></div>
@@ -327,9 +325,8 @@ async function find(kind) {
 }
 
 function alertBox(text) { document.getElementById("summary").innerHTML = `<p style="color:#cf222e">${text}</p>`; }
-function setBusy(busy) { document.querySelectorAll("#find-shortest, #find-least").forEach(b => b.disabled = busy); }
-document.getElementById("find-shortest").onclick = () => find("shortest");
-document.getElementById("find-least").onclick = () => find("least_fuel");
+function setBusy(busy) { document.getElementById("find").disabled = busy; }
+document.getElementById("find").onclick = () => find("least_fuel");  // the least-fuel plan finds the shortest route first
 </script>
 </body>
 </html>
