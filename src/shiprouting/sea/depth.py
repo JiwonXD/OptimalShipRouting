@@ -51,7 +51,10 @@ class LandOrShallow:
         self.tree, self.fraction = land.tree, land.fraction
 
     def shallow(self, lat, lon) -> np.ndarray:
-        return (-self.bathy.elevation(lat, lon) <= self.min_depth) & ~exempted(lat, lon, self.exempt, self.exempt_km)
+        lat, lon = np.broadcast_arrays(np.asarray(lat, float), np.asarray(lon, float))
+        out = np.array(-self.bathy.elevation(lat, lon) <= self.min_depth)
+        out[out] = ~exempted(lat[out], lon[out], self.exempt, self.exempt_km)  # only where shallow: most samples are deep
+        return out
 
     def contains(self, lat, lon) -> np.ndarray:
         return self.land.contains(lat, lon) | self.shallow(lat, lon)
