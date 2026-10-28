@@ -88,6 +88,8 @@ def handler(jobs: Jobs, info: dict):
         def do_GET(self):
             if self.path in ("/", "/index.html"):
                 self.send(200, (STATIC / "index.html").read_bytes(), "text/html; charset=utf-8")
+            elif self.path == "/favicon.ico":
+                self.send(204, b"", "image/x-icon")
             elif self.path == "/api/info":
                 self.json(200, info)
             elif self.path.startswith("/api/jobs/"):

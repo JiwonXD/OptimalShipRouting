@@ -66,6 +66,7 @@ const depth = L.tileLayer.wms("https://wms.gebco.net/mapserv?", {
 L.control.layers(null, { "수심 (GEBCO)": depth }).addTo(map);
 
 const points = { start: null, via: [], goal: null };
+map.createPane("points").style.zIndex = 650;  // above the routes
 const markers = L.layerGroup().addTo(map);
 const routes = L.layerGroup().addTo(map);
 
@@ -73,7 +74,7 @@ function drawPoints() {
   markers.clearLayers();
   const list = [];
   const add = (p, label, color) => {
-    L.circleMarker(p, { radius: 6, color, fillOpacity: 1 }).bindTooltip(label).addTo(markers);
+    L.circleMarker(p, { radius: 6, color, fillOpacity: 1, pane: "points" }).bindTooltip(label).addTo(markers);
     list.push(`${label}: ${p[0].toFixed(2)}, ${p[1].toFixed(2)}`);
   };
   if (points.start) add(points.start, "출발", "#1a7f37");
