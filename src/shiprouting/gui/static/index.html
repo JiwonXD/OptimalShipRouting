@@ -73,8 +73,11 @@ const routes = L.layerGroup().addTo(map);
 function drawPoints() {
   markers.clearLayers();
   const list = [];
+  // Drawn on the copy of the world nearest the start (or the view), where the routes are drawn too.
+  const ref = points.start ? points.start[1] : map.getCenter().lng;
   const add = (p, label, color) => {
-    L.circleMarker(p, { radius: 6, color, fillOpacity: 1, pane: "points" }).bindTooltip(label).addTo(markers);
+    const lon = p[1] + 360 * Math.round((ref - p[1]) / 360);
+    L.circleMarker([p[0], lon], { radius: 6, color, fillOpacity: 1, pane: "points" }).bindTooltip(label).addTo(markers);
     list.push(`${label}: ${p[0].toFixed(2)}, ${p[1].toFixed(2)}`);
   };
   if (points.start) add(points.start, "출발", "#1a7f37");
