@@ -1,0 +1,176 @@
+<!doctype html>
+<html lang="ko">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>최적 항로 탐색</title>
+<link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css">
+<script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+<style>
+  :root { --shortest: #1f6feb; --least: #d1495b; --line: #d0d7de; --muted: #57606a; }
+  * { box-sizing: border-box; }
+  body { margin: 0; font: 14px/1.45 system-ui, sans-serif; display: flex; height: 100vh; background: #fff; color: #1f2328; }
+  #map { flex: 1; }
+  aside { width: 340px; padding: 14px; overflow-y: auto; border-left: 1px solid var(--line); }
+  h1 { font-size: 17px; margin: 0 0 10px; }
+  fieldset { border: 1px solid var(--line); border-radius: 6px; margin: 0 0 10px; padding: 8px 10px; }
+  legend { color: var(--muted); padding: 0 4px; }
+  label { display: block; margin: 3px 0; }
+  input[type=datetime-local] { width: 100%; }
+  button { width: 100%; padding: 8px; margin: 4px 0; border: 0; border-radius: 6px; color: #fff; font-weight: 600; cursor: pointer; }
+  button:disabled { opacity: .5; cursor: default; }
+  #find-shortest { background: var(--shortest); }
+  #find-least { background: var(--least); }
+  #clear { background: #6e7781; }
+  #points { margin: 6px 0 0; padding-left: 18px; color: var(--muted); }
+  #status { white-space: pre-wrap; font: 12px/1.4 ui-monospace, monospace; color: var(--muted); max-height: 160px; overflow-y: auto; }
+  table { border-collapse: collapse; width: 100%; margin-top: 6px; }
+  td, th { border-bottom: 1px solid var(--line); padding: 3px 4px; text-align: right; }
+  th:first-child, td:first-child { text-align: left; }
+  .swatch { display: inline-block; width: 10px; height: 10px; border-radius: 2px; margin-right: 4px; }
+</style>
+</head>
+<body>
+<div id="map"></div>
+<aside>
+  <h1>최적 항로 탐색</h1>
+  <fieldset>
+    <legend>지도를 클릭해서 정하기</legend>
+    <label><input type="radio" name="pick" value="start" checked> 출발점</label>
+    <label><input type="radio" name="pick" value="via"> 경유점 (순서대로 추가)</label>
+    <label><input type="radio" name="pick" value="goal"> 도착점</label>
+    <ol id="points"></ol>
+  </fieldset>
+  <fieldset>
+    <legend>시각 (UTC)</legend>
+    <label>출발 <input type="datetime-local" id="departure"></label>
+    <label>도착 기한 <input type="datetime-local" id="deadline"></label>
+    <div id="forecast" style="color: var(--muted)"></div>
+  </fieldset>
+  <button id="find-shortest">최단 경로 탐색</button>
+  <button id="find-least">최적 경로 탐색</button>
+  <button id="clear">지우기</button>
+  <div id="summary"></div>
+  <div id="status"></div>
+</aside>
+<script>
+const SHORTEST = "#1f6feb", LEAST = "#d1495b";  // also --shortest and --least above
+const map = L.map("map", { worldCopyJump: true }).setView([30, 160], 3);
+L.tileLayer("https://tile.openstreetmap.org/{z}/{x}/{y}.png", {
+  maxZoom: 10, attribution: "&copy; OpenStreetMap contributors",
+}).addTo(map);
+const depth = L.tileLayer.wms("https://wms.gebco.net/mapserv?", {
+  layers: "GEBCO_LATEST", format: "image/png", transparent: true, opacity: 0.5,
+  attribution: "GEBCO Compilation Group (2026) GEBCO 2026 Grid",
+});
+L.control.layers(null, { "수심 (GEBCO)": depth }).addTo(map);
+
+const points = { start: null, via: [], goal: null };
+const markers = L.layerGroup().addTo(map);
+const routes = L.layerGroup().addTo(map);
+
+function drawPoints() {
+  markers.clearLayers();
+  const list = [];
+  const add = (p, label, color) => {
+    L.circleMarker(p, { radius: 6, color, fillOpacity: 1 }).bindTooltip(label).addTo(markers);
+    list.push(`${label}: ${p[0].toFixed(2)}, ${p[1].toFixed(2)}`);
+  };
+  if (points.start) add(points.start, "출발", "#1a7f37");
+  points.via.forEach((p, i) => add(p, `경유 ${i + 1}`, "#9a6700"));
+  if (points.goal) add(points.goal, "도착", "#cf222e");
+  document.getElementById("points").innerHTML = list.map(t => `<li>${t}</li>`).join("");
+}
+
+map.on("click", e => {
+  const p = e.latlng.wrap();
+  const pick = document.querySelector("input[name=pick]:checked").value;
+  if (pick === "via") points.via.push([p.lat, p.lng]); else points[pick] = [p.lat, p.lng];
+  drawPoints();
+});
+
+document.getElementById("clear").onclick = () => {
+  points.start = points.goal = null; points.via = [];
+  routes.clearLayers(); drawPoints();
+  document.getElementById("summary").innerHTML = document.getElementById("status").textContent = "";
+};
+
+// Longitudes kept within 180° of the point before, so a route across the date line is drawn across it.
+function unwrap(lat, lon) {
+  const out = [];
+  let prev = lon[0];
+  for (let i = 0; i < lat.length; i++) {
+    let x = lon[i];
+    while (x - prev > 180) x -= 360;
+    while (x - prev < -180) x += 360;
+    out.push([lat[i], x]); prev = x;
+  }
+  return out;
+}
+
+const iso = s => s.slice(0, 16);
+fetch("/api/info").then(r => r.json()).then(info => {
+  const start = new Date(info.forecast_start + "Z");
+  document.getElementById("departure").value = iso(info.forecast_start);
+  document.getElementById("deadline").value = iso(new Date(start.getTime() + 15 * 86400e3).toISOString());
+  document.getElementById("forecast").textContent = `예보 ${iso(info.forecast_start)} ~ ${iso(info.forecast_end)}`;
+});
+
+function row(name, color, r) {
+  const kn = Object.entries(r.speeds_kn).map(([k, n]) => `${k}×${n}`).join(", ");
+  return `<tr><td><span class="swatch" style="background:${color}"></span>${name}</td>
+    <td>${r.km.toFixed(0)} km</td><td>${r.hours.toFixed(1)} h</td><td>${r.fuel_t.toFixed(2)} t</td></tr>
+    <tr><td colspan="4" style="color:var(--muted)">속력(노트×구간): ${kn}${r.links.length ? " · " + r.links.join(", ") : ""}</td></tr>`;
+}
+
+function show(out) {
+  routes.clearLayers();
+  const parts = [];
+  if (out.error) parts.push(`<p style="color:#cf222e">${out.error}</p>`);
+  if (out.shortest) {
+    L.polyline(unwrap(out.shortest.lat, out.shortest.lon), { color: SHORTEST, weight: 3 }).addTo(routes);
+    parts.push(row("최단", SHORTEST, out.shortest));
+  }
+  if (out.least_fuel) {
+    L.polyline(unwrap(out.least_fuel.lat, out.least_fuel.lon), { color: LEAST, weight: 3 }).addTo(routes);
+    parts.push(row("최적", LEAST, out.least_fuel));
+  }
+  let html = parts.filter(p => p.startsWith("<p")).join("");
+  const rows = parts.filter(p => !p.startsWith("<p")).join("");
+  if (rows) html += `<table><tr><th></th><th>거리</th><th>시간</th><th>연료</th></tr>${rows}</table>`;
+  if (out.saving_t !== undefined) html += `<p><b>절감 ${out.saving_t.toFixed(2)} t (${out.saving_pct.toFixed(2)}%)</b></p>`;
+  if (out.moved_km && out.moved_km.some(km => km > 1)) html += `<p style="color:var(--muted)">가장 가까운 바다 칸으로 옮김: ${out.moved_km.join(", ")} km</p>`;
+  document.getElementById("summary").innerHTML = html;
+}
+
+async function find(kind) {
+  if (!points.start || !points.goal) { alertBox("출발점과 도착점을 먼저 정해 주세요."); return; }
+  const body = {
+    kind, start: points.start, goal: points.goal, via: points.via,
+    departure: document.getElementById("departure").value, deadline: document.getElementById("deadline").value,
+  };
+  const res = await fetch("/api/plan", { method: "POST", body: JSON.stringify(body) });
+  const { job, error } = await res.json();
+  if (!job) { alertBox(error); return; }
+  setBusy(true);
+  const status = document.getElementById("status");
+  const t0 = Date.now();
+  const poll = async () => {
+    const j = await (await fetch(`/api/jobs/${job}`)).json();
+    status.textContent = `탐색 중 ${((Date.now() - t0) / 1000).toFixed(0)}초\n` + j.log.join("\n");
+    status.scrollTop = status.scrollHeight;
+    if (j.state === "running") { setTimeout(poll, 2000); return; }
+    setBusy(false);
+    status.textContent = `끝 (${j.seconds}초)\n` + j.log.join("\n");
+    show(j.error ? { error: j.error } : j.result);
+  };
+  poll();
+}
+
+function alertBox(text) { document.getElementById("summary").innerHTML = `<p style="color:#cf222e">${text}</p>`; }
+function setBusy(busy) { document.querySelectorAll("#find-shortest, #find-least").forEach(b => b.disabled = busy); }
+document.getElementById("find-shortest").onclick = () => find("shortest");
+document.getElementById("find-least").onclick = () => find("least_fuel");
+</script>
+</body>
+</html>

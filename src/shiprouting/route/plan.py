@@ -37,9 +37,10 @@ SPEEDS_KN = (12, 14, 16, 18, 20, 22, 24)
 
 def plan(graph: Graph, ship: Ship, forecast: Forecast, start, goal, departure, deadline, speeds_kn=SPEEDS_KN,
          tables: str | None = None, max_tries: int = 12, max_seconds: float = math.inf, via=(), legs: str = "distance",
-         land=None, currents: bool = True, prices=None) -> dict:
-    """prices: the price of an hour each leg met its time at in a like plan before (out["prices"]
-    of the last plan of the same voyage, say), to start from; one for legs="shared"."""
+         land=None, currents: bool = True, prices=None, least_fuel: bool = True) -> dict:
+    """least_fuel=False finds the shortest route only. prices: the price of an hour each leg met
+    its time at in a like plan before (out["prices"] of the last plan of the same voyage, say),
+    to start from; one for legs="shared"."""
     departure, deadline = np.datetime64(departure, "s"), np.datetime64(deadline, "s")
     if not forecast.time[0] <= departure < forecast.time[-1]:
         raise ValueError(f"departure {departure} is outside the forecast")
@@ -90,6 +91,8 @@ def plan(graph: Graph, ship: Ship, forecast: Forecast, start, goal, departure, d
         out["error"] = f"the deadline cannot be met: the shortest route ({r.km:.0f} km) needs {kn:.1f} kn with the current"
         return out
     out["shortest"] = describe(r, fuel, np.full(len(r.lat) - 1, kn), float(clock[-1]), time.perf_counter() - t0)
+    if not least_fuel:
+        return out
 
     t0 = time.perf_counter()
     # The shortest route's own speed is offered too, so sailing it as it does is among the choices.
