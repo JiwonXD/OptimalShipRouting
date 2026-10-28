@@ -10,9 +10,12 @@ departure, so the saving is what choosing the way and the speeds is worth.
 Waypoints are passed in order, each leg searched after the last. The least-fuel route
 either gives each leg a share of the time in proportion to its shortest distance
 (legs="distance"), or searches all legs at one price of an hour and meets the deadline
-for the voyage as a whole (legs="shared"). Given the land, both routes then have their
-sharp turns smoothed out (quadtree.smooth_turns), waypoints kept, and the least-fuel
-route is re-timed to the speeds on offer and spends the time that saves.
+for the voyage as a whole (legs="shared"). Given the land, the cells' steps are cut out:
+the shortest route's legs are straightened to great-circle arcs (quadtree.straighten),
+and the least-fuel route takes the shortcuts that burn no more fuel (SpeedChoice.shortcut).
+Both routes then have their sharp turns smoothed out (quadtree.smooth_turns), waypoints
+kept, and the least-fuel route is re-timed to the speeds on offer and spends the time
+that saves.
 
 With currents, the surface current changes each move's speed over the ground (FuelCost),
 so the shortest route's one speed through the water is adjusted until it arrives at the
@@ -29,7 +32,7 @@ from shiprouting.fuel.waves import AddedResistanceTable
 from shiprouting.route.fuel import KNOT, FuelCost
 from shiprouting.route.speed import SpeedChoice, meet_eta
 from shiprouting.sea.latlon import SearchResult, haversine_km
-from shiprouting.sea.quadtree import Graph, astar, join_legs, smooth_turns
+from shiprouting.sea.quadtree import Graph, astar, join_legs, smooth_turns, straighten
 from shiprouting.weather.forecast import Forecast
 
 SPEEDS_KN = (12, 14, 16, 18, 20, 22, 24)
@@ -76,6 +79,8 @@ def plan(graph: Graph, ship: Ship, forecast: Forecast, start, goal, departure, d
 
     t0 = time.perf_counter()
     shortest = [astar(graph, a, b) for a, b in zip(nodes[:-1], nodes[1:])]
+    if land is not None:  # the cells' path steps between grid directions: cut it to great-circle arcs
+        shortest = [straighten(land, leg, piece_km=20.0) for leg in shortest]
     r = smoothed(join_legs(shortest))
     need_kn = r.km / hours / 1.852
     if need_kn > max(speeds_kn):
@@ -119,7 +124,7 @@ def plan(graph: Graph, ship: Ship, forecast: Forecast, start, goal, departure, d
         return out
     out["prices"] = [min(t["per_hour"] for t in tries if t["in_time"]) for tries in out["tries"]]  # the lowest that arrived in time
     if land is not None:
-        f = choice.fill_slack(choice.snap_up(smoothed(f)), hours)
+        f = choice.fill_slack(choice.snap_up(smoothed(choice.shortcut(land, f, waypoints(f)))), hours)
     out["least_fuel"] = describe(f, f.cost, choice.speeds_kn(f), float(f.clock[-1] - f.clock[0]), time.perf_counter() - t0)
     ends = [0, *waypoints(f), len(f.lat) - 1]
     seg_km = np.r_[0.0, np.cumsum(haversine_km(f.lat[:-1], f.lon[:-1], f.lat[1:], f.lon[1:]))]

@@ -8,7 +8,7 @@ from shiprouting.fuel import waves
 from shiprouting.fuel.ships import KCS_SHIP
 from shiprouting.route import plan as plan_module
 from shiprouting.sea.land import Land
-from shiprouting.sea.latlon import turn_deg
+from shiprouting.sea.latlon import haversine_km, turn_deg
 from shiprouting.sea.quadtree import Graph
 from test_fuel_route import T0, forecast
 
@@ -87,3 +87,32 @@ def test_against_a_current_the_shortest_route_speeds_up_to_keep_the_deadline():
     assert float(next(iter(out["shortest"]["speeds_kn"]))) > float(next(iter(still["shortest"]["speeds_kn"]))) + 1.5
     assert out["least_fuel"]["hours"] <= 30.0 + 0.05
     assert out["least_fuel"]["fuel_t"] <= out["shortest"]["fuel_t"]
+
+
+def test_the_shortest_route_follows_the_great_circle_where_the_sea_is_open():
+    fc = forecast(wind_u=-10.0, Hs=2.0, wave_from_x=1.0, T_m10=8.0)
+    start, goal = (0.5, 150.5), (4.5, 165.5)  # not a grid direction: a few diagonal steps, then straight along a row
+    out = plan_module.plan(GRAPH, KCS_SHIP, fc, start, goal, T0, T0 + np.timedelta64(80, "h"), (12, 16, 20), land=LAND,
+                           least_fuel=False)
+    assert out["shortest"]["km"] == pytest.approx(float(haversine_km(*start, *goal)), rel=0.002)
+
+
+def test_the_least_fuel_route_cuts_the_grid_steps_in_calm_open_sea():
+    fc = forecast(wind_u=-10.0, Hs=2.0, wave_from_x=1.0, T_m10=8.0)
+    start, goal = (0.5, 150.5), (4.5, 165.5)
+    out = plan_module.plan(GRAPH, KCS_SHIP, fc, start, goal, T0, T0 + np.timedelta64(80, "h"), (12, 16, 20), land=LAND)
+    assert out["least_fuel"]["km"] == pytest.approx(float(haversine_km(*start, *goal)), rel=0.01)
+    assert out["least_fuel"]["fuel_t"] <= out["shortest"]["fuel_t"]
+
+
+def test_the_least_fuel_route_keeps_going_round_a_storm():
+    fc = forecast(wind_u=-10.0, Hs=2.0, wave_from_x=1.0, T_m10=8.0)
+    lat, lon = np.arange(-90.0, 90.5, 1.0), np.arange(0.0, 360.0, 1.0)
+    storm = (np.abs(lat - 0.5) <= 2)[:, None] & ((lon >= 155) & (lon <= 160))[None, :]
+    for name, value in (("Hs", 7.0), ("wind_u", -30.0)):
+        fc.fields[name][:, storm] = value
+    out = plan_module.plan(GRAPH, KCS_SHIP, fc, START, (0.5, 165.5), T0, T0 + np.timedelta64(60, "h"), (12, 16, 20), land=LAND)
+    r = out["least_fuel"]
+    lat, lon = np.array(r["lat"]), np.array(r["lon"])
+    assert not ((np.abs(lat - 0.5) < 2.5) & (lon > 155) & (lon < 160)).any()  # round it, not through
+    assert r["fuel_t"] < out["shortest"]["fuel_t"]
