@@ -145,9 +145,14 @@ def channel(bathy, land, name: str, a, b, min_depth: float = 15.0, pad: float = 
         path.append(int(parent[path[-1]]))
     p_lat, p_lon = flat_lat[path[::-1]], flat_lon[path[::-1]]
 
-    def clear(u, v):  # the straight leg, sampled every quarter cell
-        t = np.linspace(0, 1, int(max(abs(p_lat[v] - p_lat[u]), abs(p_lon[v] - p_lon[u])) / (bathy.step / 4)) + 2)
-        return deep(p_lat[u] + t * (p_lat[v] - p_lat[u]), p_lon[u] + t * (p_lon[v] - p_lon[u])).all()
+    def clear(u, v):
+        """The straight leg sampled every eighth of a cell, each sample with the four points an eighth
+        of a cell either way: a corner clipped between two samples, or a leg running along a cell
+        edge, is then caught, and the great circle (metres off the line) stays over deep cells too."""
+        t = np.linspace(0, 1, int(max(abs(p_lat[v] - p_lat[u]), abs(p_lon[v] - p_lon[u])) / (bathy.step / 8)) + 2)
+        s_lat, s_lon = p_lat[u] + t * (p_lat[v] - p_lat[u]), p_lon[u] + t * (p_lon[v] - p_lon[u])
+        d = bathy.step / 8
+        return all(deep(s_lat + a, s_lon + b).all() for a in (-d, d) for b in (-d, d))
 
     keep = [0]
     while keep[-1] < len(path) - 1:  # the farthest point still in a clear straight line (the next one always is)

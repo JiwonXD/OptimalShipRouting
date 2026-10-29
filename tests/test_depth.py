@@ -131,3 +131,31 @@ def test_a_channel_does_not_cut_the_corners_between_deep_cells():
     land = Land([shapely.box(-180.0, -90.0, 140.0, 90.0), shapely.box(150.0, -90.0, 180.0, 90.0)])
     with pytest.raises(ValueError, match="no water deeper"):
         channel(Checkers(), land, "해협", (0.5, 143.0), (0.5, 147.0))
+
+
+
+def test_a_channel_through_scattered_banks_never_clips_a_shallow_cell():
+    import shapely
+
+    from shiprouting.sea.depth import channel
+    from shiprouting.sea.quadtree import along
+
+    shallow = np.random.default_rng(4).random((200, 200)) > 0.7  # 10 m cells scattered over the bank (seed 4 clipped one)
+
+    class Scattered(Bank):
+        def elevation(self, lat, lon):
+            lat, lon = np.broadcast_arrays(np.asarray(lat, float), np.asarray(lon, float))
+            i = np.floor((lat - self.lat0) / self.step + 0.5).astype(int) - 3560
+            j = np.floor((lon - self.lon0) / self.step + 0.5).astype(int) - 12940
+            bank = (lon >= 144) & (lon <= 146)
+            hit = shallow[np.clip(i, 0, 199), np.clip(j, 0, 199)] & (i >= 0) & (i < 200)
+            return np.where(bank & hit, -10, np.where(bank, -30, -100))
+
+    land = Land([shapely.box(-180.0, -90.0, 140.0, 90.0), shapely.box(150.0, -90.0, 180.0, 90.0)])
+    link = channel(Scattered(), land, "해협", (0.0, 143.0), (0.5, 147.0), pad=0.3)
+    f = np.linspace(0, 1, 4000)
+    for a in range(len(link.lat) - 1):  # along the great circle and the straight line, as the depth checks sample them
+        ends = (np.full_like(f, v) for v in (link.lat[a], link.lon[a], link.lat[a + 1], link.lon[a + 1]))
+        straight = (link.lat[a] + f * (link.lat[a + 1] - link.lat[a]), link.lon[a] + f * (link.lon[a + 1] - link.lon[a]))
+        for lat, lon in (along(*ends, f), straight):
+            assert (-Scattered().elevation(lat, lon) > 15).all(), a
