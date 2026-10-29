@@ -7,13 +7,18 @@ name = "shiprouting"
 version = "0.0.1"
 description = "Weather-aware ship route and speed optimisation for minimum fuel"
 requires-python = ">=3.11"
-dependencies = []
+dependencies = ["numba", "numpy", "shapely"]
 
 [project.optional-dependencies]
 dev = ["pytest"]
+weather = ["eccodes", "ecmwf-opendata"]
+sea = ["h5py", "pyogrio", "scipy"]
 
 [tool.setuptools.packages.find]
 where = ["src"]
+
+[tool.setuptools.package-data]
+"shiprouting.gui" = ["static/*"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

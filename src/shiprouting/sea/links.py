@@ -1,0 +1,90 @@
+"""Waterways too narrow for the grid, added as explicit links between two sea ends.
+
+A link is a polyline the ship follows from end to end; its cost is its length.
+The geometry comes from OpenStreetMap ways (Overpass JSON with `out geom`),
+chained through shared nodes from the node nearest one sea end to the node
+nearest the other. Canals use the canal centreline; a strait narrower than
+the grid's smallest cells uses its traffic separation lane.
+"""
+
+import heapq
+import json
+from dataclasses import dataclass
+
+import numpy as np
+
+from shiprouting.sea.latlon import haversine_km
+
+# The Overpass file holding each waterway's ways, its sea ends (lat, lon), and the
+# seamark:type of the ways to use (None: all of them).
+LINKS = {
+    "수에즈": ("canals_suez.json", (31.2757, 32.3263), (29.9303, 32.5607), None),
+    "파나마": ("canals_panama.json", (8.9429, -79.5647), (9.3115, -79.9198), None),
+    "보스포루스": ("straits_bosporus.json", (41.226, 29.131), (40.979, 28.989), "separation_lane"),
+}
+
+MIN_STEP_KM = 0.05  # a node closer than this to the one before adds nothing to a ship's way
+
+
+@dataclass(frozen=True)
+class Link:
+    name: str
+    lat: np.ndarray  # polyline from one end to the other
+    lon: np.ndarray
+
+    @property
+    def km(self) -> float:
+        return float(haversine_km(self.lat[:-1], self.lon[:-1], self.lat[1:], self.lon[1:]).sum())
+
+
+def chain(name: str, ways: list[dict], a: tuple[float, float], b: tuple[float, float]) -> Link:
+    """Shortest path over the ways' nodes from the node nearest `a` to the node nearest `b`."""
+    pos, edges = {}, {}
+    for way in ways:
+        nodes = way["nodes"]
+        for n, g in zip(nodes, way["geometry"]):
+            pos[n] = (g["lat"], g["lon"])
+        for u, v in zip(nodes[:-1], nodes[1:]):
+            km = float(haversine_km(*pos[u], *pos[v]))
+            edges.setdefault(u, []).append((v, km))
+            edges.setdefault(v, []).append((u, km))
+    ids = list(pos)
+    lat, lon = np.array([pos[n] for n in ids]).T
+    s = ids[int(np.argmin(haversine_km(lat, lon, *a)))]
+    g = ids[int(np.argmin(haversine_km(lat, lon, *b)))]
+
+    best, parent, open_list = {s: 0.0}, {s: None}, [(0.0, s)]
+    while open_list:
+        d, u = heapq.heappop(open_list)
+        if u == g:
+            break
+        if d > best[u]:
+            continue
+        for v, km in edges.get(u, ()):
+            if d + km < best.get(v, np.inf):
+                best[v], parent[v] = d + km, u
+                heapq.heappush(open_list, (d + km, v))
+    else:
+        raise ValueError(f"{name}: the ways do not connect the two ends")
+
+    path = [g]
+    while parent[path[-1]] is not None:
+        path.append(parent[path[-1]])
+    lat, lon = np.array([pos[n] for n in reversed(path)]).T
+    keep = [0]  # OSM can put two nodes on one spot, or metres apart
+    for i in range(1, len(lat)):
+        if haversine_km(lat[keep[-1]], lon[keep[-1]], lat[i], lon[i]) >= MIN_STEP_KM:
+            keep.append(i)
+    keep[-1] = len(lat) - 1
+    return Link(name, lat[keep], lon[keep])
+
+
+def load_links(osm_dir) -> list[Link]:
+    from pathlib import Path
+
+    links = []
+    for name, (file, a, b, kind) in LINKS.items():
+        data = json.loads((Path(osm_dir) / file).read_text(encoding="utf-8"))
+        ways = [e for e in data["elements"] if e["type"] == "way" and kind in (None, e.get("tags", {}).get("seamark:type"))]
+        links.append(chain(name, ways, a, b))
+    return links
