@@ -203,13 +203,24 @@ def sea_graph(args):
         from shiprouting.sea.links import load_links
 
         links = load_links(args.links)
+    channels = {}
     if args.bathymetry:
-        from shiprouting.sea.depth import Bathymetry, LandOrShallow, link_ends
+        from shiprouting.sea.depth import CHANNELS, Bathymetry, LandOrShallow, link_ends
 
-        land = LandOrShallow(land, Bathymetry(args.bathymetry), args.min_depth, link_ends(), args.link_approach_km)
+        bathy = Bathymetry(args.bathymetry)
+        channels = CHANNELS
+        land = LandOrShallow(land, bathy, args.min_depth, link_ends(), args.link_approach_km)
     t0 = time.perf_counter()
-    key = json.dumps({k: getattr(args, k) for k in ("land", "min_step", "links", "bathymetry", "min_depth", "link_approach_km")})
-    graph = Graph.cached(args.graph, key, lambda: Graph.build(land, min_step=args.min_step, links=links))
+    key = json.dumps({k: getattr(args, k) for k in ("land", "min_step", "links", "bathymetry", "min_depth", "link_approach_km")}
+                     | ({"channels": channels} if channels else {}))
+
+    def build():
+        from shiprouting.sea.depth import channel
+
+        traced = [channel(bathy, land.land, name, a, b, args.min_depth) for name, (a, b) in channels.items()]
+        return Graph.build(land, min_step=args.min_step, links=links + traced)
+
+    graph = Graph.cached(args.graph, key, build)
     print(f"graph: {len(graph.lat)} cells, links {[k.name for *_, k in graph.links]}, ready in {time.perf_counter() - t0:.0f} s", flush=True)
     return land, graph
 
