@@ -140,7 +140,7 @@ def check(args):
             r = res[key]
             lat, lon, on_link = np.array(r["lat"]), np.array(r["lon"]), np.array(r["on_link"])
             seg = haversine_km(lat[:-1], lon[:-1], lat[1:], lon[1:])
-            free = ~on_link[1:]  # segment i ends at point i + 1; a link's own segments are not checked
+            free = ~on_link  # one per segment; a link's own segments are not checked
             hits = {name: np.nonzero(arcs_on_land(l, lat[:-1][free], lon[:-1][free], lat[1:][free], lon[1:][free]))[0]
                     for name, l in lands.items()}
             turns = turn_deg(lat, lon) if len(lat) > 2 else np.array([])
