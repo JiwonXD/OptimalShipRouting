@@ -1,0 +1,170 @@
+"""A map in the browser to plan one voyage: click the start, the goal and any waypoints, then
+find the shortest route or the least-fuel one (route.plan) and see both drawn.
+
+Serves on localhost. The sea graph is loaded once at start. Each search plans on the newest
+forecast run out by the departure (voyage.Runs: a run is out some hours after it starts),
+loaded when first needed and kept until another is. A search takes minutes and most of
+the memory, so one runs at a time, in a thread the page polls for the lines it prints and,
+at the end, the plan.
+"""
+
+import contextlib
+import json
+import threading
+import time
+import uuid
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from pathlib import Path
+
+STATIC = Path(__file__).with_name("static")
+ROUTE_KEYS = ("km", "hours", "fuel_t", "speeds_kn", "links", "lat", "lon", "on_link", "segment_kn")
+
+
+class Lines:
+    """A file for print that hands each finished line to add."""
+
+    def __init__(self, add):
+        self.add, self.part = add, ""
+
+    def write(self, text: str) -> int:
+        *done, self.part = (self.part + text).split("\n")
+        for line in done:
+            if line.strip():
+                self.add(line)
+        return len(text)
+
+    def flush(self) -> None:
+        pass
+
+
+class Jobs:
+    """Searches run one at a time in a thread: run(request) returns the plan, and what it prints
+    is kept as the job's log."""
+
+    def __init__(self, run):
+        self.run, self.jobs, self.lock = run, {}, threading.Lock()
+
+    def start(self, request: dict) -> str | None:
+        """The new job's id, or None while another is running."""
+        with self.lock:
+            if any(j["state"] == "running" for j in self.jobs.values()):
+                return None
+            key = uuid.uuid4().hex[:8]
+            self.jobs[key] = {"state": "running", "log": [], "result": None, "error": None, "started": time.time()}
+        threading.Thread(target=self._work, args=(self.jobs[key], request), daemon=True).start()
+        return key
+
+    def _work(self, job: dict, request: dict) -> None:
+        try:
+            with contextlib.redirect_stdout(Lines(job["log"].append)):  # one job at a time, so stdout is its alone
+                job["result"] = self.run(request)
+        except Exception as e:  # shown on the page
+            job["error"] = f"{type(e).__name__}: {e}"
+        job["seconds"] = round(time.time() - job["started"], 1)
+        job["state"] = "done"
+
+    def get(self, key: str) -> dict | None:
+        return self.jobs.get(key)
+
+
+def planner(graph, land, runs, ship, tables: str | None = None):
+    """run for Jobs: a request {start, goal, via, departure, deadline, kind: "shortest" | "least_fuel"}
+    planned with route.plan on runs.newest(departure), the routes cut down to what the page draws."""
+    import numpy as np
+
+    from shiprouting.route.plan import plan
+
+    def run(request: dict) -> dict:
+        t0 = time.perf_counter()
+        try:
+            at, forecast = runs.newest(np.datetime64(request["departure"], "s"))
+        except ValueError:  # no run out yet
+            return {"error": f"출발 시각 {request['departure']}보다 먼저 나온 예보가 없어요."}
+        print(f"forecast run {at} ready in {time.perf_counter() - t0:.0f} s", flush=True)
+        out = plan(graph, ship, forecast, tuple(request["start"]), tuple(request["goal"]), request["departure"],
+                   request["deadline"], tables=tables, via=[tuple(p) for p in request.get("via", [])], land=land,
+                   least_fuel=request["kind"] == "least_fuel")
+        for key in ("shortest", "least_fuel"):
+            if key in out:
+                out[key] = {k: out[key][k] for k in ROUTE_KEYS}
+        out.pop("tries", None)
+        out["run"] = str(at)
+        return out
+
+    return run
+
+
+def handler(jobs: Jobs, info: dict):
+    class Handler(BaseHTTPRequestHandler):
+        def do_GET(self):
+            if self.path in ("/", "/index.html"):
+                self.send(200, (STATIC / "index.html").read_bytes(), "text/html; charset=utf-8")
+            elif self.path == "/favicon.ico":
+                self.send(204, b"", "image/x-icon")
+            elif self.path == "/api/info":
+                self.json(200, info)
+            elif self.path.startswith("/api/jobs/"):
+                job = jobs.get(self.path.rsplit("/", 1)[-1])
+                self.json(200, job) if job else self.json(404, {"error": "no such job"})
+            else:
+                self.json(404, {"error": "not found"})
+
+        def do_POST(self):
+            if self.path != "/api/plan":
+                return self.json(404, {"error": "not found"})
+            try:
+                request = json.loads(self.rfile.read(int(self.headers.get("Content-Length", 0))))
+            except ValueError:
+                return self.json(400, {"error": "요청을 JSON으로 읽을 수 없어요."})
+            key = jobs.start(request)
+            self.json(202, {"job": key}) if key else self.json(409, {"error": "a search is already running"})
+
+        def json(self, code: int, body) -> None:
+            self.send(code, json.dumps(body, ensure_ascii=False).encode(), "application/json; charset=utf-8")
+
+        def send(self, code: int, body: bytes, kind: str) -> None:
+            self.send_response(code)
+            self.send_header("Content-Type", kind)
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+
+        def log_message(self, *args):  # no line per poll
+            pass
+
+    return Handler
+
+
+def main() -> None:
+    import argparse
+    import os
+    import re
+
+    from shiprouting.fuel.ships import KCS_SHIP
+    from shiprouting.route.plan import add_sea_args, sea_graph
+    from shiprouting.route.voyage import HOUR, Runs
+
+    parser = argparse.ArgumentParser(description="Plan a voyage on a map in the browser.")
+    parser.add_argument("land", help="land polygons shapefile")
+    parser.add_argument("runs", help="folder of the ECMWF runs, one folder YYYYMMDDHH of GRIB2 files each")
+    parser.add_argument("--lag-hours", type=float, default=0.0, help="a run is taken as out this long after it starts")
+    parser.add_argument("--tables", help="folder the wave added resistance tables are kept in")
+    parser.add_argument("--port", type=int, default=8000)
+    add_sea_args(parser)
+    args = parser.parse_args()
+
+    land, graph = sea_graph(args)
+    runs = Runs(args.runs, args.lag_hours, name=r"\d{8}00")  # the full 00z runs (15 days each)
+    steps = [int(m.group(1)) for m in (re.search(r"step(\d+)", n) for n in os.listdir(runs.folders[-1])) if m]
+    info = {  # departures there is a run out for, up to the end of the last run
+        "forecast_start": str(runs.times[0] + args.lag_hours * HOUR), "forecast_end": str(runs.times[-1] + max(steps) * HOUR),
+        "runs": len(runs.times), "lag_hours": args.lag_hours,
+    }
+    jobs = Jobs(planner(graph, land, runs, KCS_SHIP, args.tables))
+    server = ThreadingHTTPServer(("127.0.0.1", args.port), handler(jobs, info))
+    print(f"open http://localhost:{args.port}", flush=True)
+    server.serve_forever()
+
+
+if __name__ == "__main__":
+    main()

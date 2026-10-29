@@ -249,9 +249,10 @@ def astar(
 
 def join_legs(legs: list[SearchResult]) -> SearchResult:
     """The legs as one path, each leg's clock carrying on from where the last one ended."""
-    clock = [legs[0].clock]
+    clock, end = [legs[0].clock], legs[0].clock[-1]
     for r in legs[1:]:
-        clock.append(r.clock[1:] - r.clock[0] + clock[-1][-1])
+        clock.append(r.clock[1:] - r.clock[0] + end)
+        end = clock[-1][-1] if len(r.clock) > 1 else end  # a leg of one point adds none
     return SearchResult(
         np.concatenate([legs[0].lat] + [r.lat[1:] for r in legs[1:]]),
         np.concatenate([legs[0].lon] + [r.lon[1:] for r in legs[1:]]),
@@ -265,9 +266,13 @@ def join_legs(legs: list[SearchResult]) -> SearchResult:
     )
 
 
-def straighten(land: Land, r: SearchResult, clearance_km: float = 0.0) -> SearchResult:
+def straighten(land: Land, r: SearchResult, clearance_km: float = 0.0, piece_km: float | None = None) -> SearchResult:
     """Cut the corners of a path: from each kept point, go straight to the farthest later point
-    the great-circle arc to which stays clearance_km off land. Links are kept as they are."""
+    the great-circle arc to which stays clearance_km off land. Links are kept as they are. The
+    clock (and cost) is the distance, like astar's by default.
+
+    Given piece_km, each arc is cut into equal pieces no longer than that, so a cost taken
+    per segment (the weather at its midpoint) still follows the way."""
     t0 = time.perf_counter()
     lat, lon = r.lat, np.degrees(np.unwrap(np.radians(r.lon)))  # continuous across ±180°
     fixed = np.zeros(len(lat), bool)
@@ -287,9 +292,19 @@ def straighten(land: Land, r: SearchResult, clearance_km: float = 0.0) -> Search
         on_link.append(bool(r.on_link[i]) and j == i + 1)
         keep.append(j)
         i = j
-    lat, lon = lat[keep], (lon[keep] + 180) % 360 - 180
-    km = float(haversine_km(lat[:-1], lon[:-1], lat[1:], lon[1:]).sum())
-    return SearchResult(lat, lon, np.array(on_link, bool), r.links, km, r.expanded, time.perf_counter() - t0)
+    lat, lon, on_link = lat[keep], lon[keep], np.array(on_link, bool)
+    if piece_km is not None:
+        n = np.where(on_link, 1, np.ceil(haversine_km(lat[:-1], lon[:-1], lat[1:], lon[1:]) / piece_km).astype(int))
+        a = np.repeat(np.arange(len(n)), n)
+        f = np.arange(len(a)) - np.repeat(np.cumsum(n) - n, n)
+        f = f / n[a]
+        p_lat, p_lon = along(lat[a], lon[a], lat[a + 1], lon[a + 1], f)
+        p_lat, p_lon = np.where(f == 0, lat[a], p_lat), np.where(f == 0, lon[a], p_lon)  # the kept points exactly
+        lat, lon, on_link = np.r_[p_lat, lat[-1]], np.r_[p_lon, lon[-1]], on_link[a]
+    lon = (lon + 180) % 360 - 180
+    clock = np.r_[0.0, np.cumsum(haversine_km(lat[:-1], lon[:-1], lat[1:], lon[1:]))]
+    return SearchResult(lat, lon, on_link, r.links, float(clock[-1]), r.expanded, time.perf_counter() - t0,
+                        float(clock[-1]), clock)
 
 
 def smooth_turns(land: Land, r: SearchResult, sharp: float = 60.0, reach: int = 4, keep_points=()) -> SearchResult:

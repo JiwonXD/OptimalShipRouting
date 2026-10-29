@@ -115,6 +115,19 @@ def test_straightening_keeps_links_and_crosses_the_dateline():
     assert len(t.lat) == 2
 
 
+def test_straightened_arcs_can_be_cut_into_pieces_along_the_great_circle():
+    from shiprouting.sea.quadtree import straighten
+
+    canal = Link("운하", np.array([-20.0, -20.0]), np.array([-0.5, 2.5]))
+    g = Graph.build(WALL, root=1.0, min_step=1 / 16, lat_limits=(-40.0, 40.0), links=[canal])
+    r = astar(g, g.nearest(-25.5, -5.5), g.nearest(-15.5, 7.5))
+    whole, cut = straighten(WALL, r), straighten(WALL, r, piece_km=20.0)
+    seg = haversine_km(cut.lat[:-1], cut.lon[:-1], cut.lat[1:], cut.lon[1:])
+    assert seg[~cut.on_link].max() <= 20.0 + 1e-6
+    assert cut.on_link.sum() == 1 and seg[cut.on_link][0] == pytest.approx(haversine_km(-20.0, -0.5, -20.0, 2.5))
+    assert cut.km == pytest.approx(whole.km, rel=1e-9) and cut.clock[-1] == pytest.approx(cut.km)
+    assert {(a, b) for a, b in zip(whole.lat, whole.lon)} <= {(a, b) for a, b in zip(cut.lat, cut.lon)}
+
 def test_arcs_are_checked_along_the_great_circle_not_the_lon_lat_line():
     from shiprouting.sea.latlon import segments_on_land
     from shiprouting.sea.quadtree import arcs_on_land, along

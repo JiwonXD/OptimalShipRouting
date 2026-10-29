@@ -41,12 +41,12 @@ def came_files(folders, last_step: int = 21) -> list[str]:
 
 
 class Runs:
-    """The forecast runs kept in folders named YYYYMMDDHH under root; the newest out by a time,
-    loaded when first asked for (one at a time)."""
+    """The forecast runs kept in folders named YYYYMMDDHH (matching `name`) under root; the newest
+    out by a time, loaded when first asked for (one at a time)."""
 
-    def __init__(self, root: str, lag_hours: float = 8.0, dtype=np.float32):
+    def __init__(self, root: str, lag_hours: float = 8.0, dtype=np.float32, name: str = r"\d{10}"):
         self.root, self.lag, self.dtype = root, lag_hours, dtype
-        names = sorted(n for n in os.listdir(root) if re.fullmatch(r"\d{10}", n))
+        names = sorted(n for n in os.listdir(root) if re.fullmatch(name, n))
         self.times = [np.datetime64(f"{n[:4]}-{n[4:6]}-{n[6:8]}T{n[8:10]}", "s") for n in names]
         self.folders = [os.path.join(root, n) for n in names]
         self._run, self._forecast = None, None
@@ -123,7 +123,8 @@ def voyage(graph: Graph, ship: Ship, land, runs: Runs, came: Forecast, start, go
         t0 = time.perf_counter()
         target = deadline
         for _ in range(8):
-            p = plan(graph, ship, forecast, pos, goal, now, target, speeds_kn, tables, max_tries, max_seconds, ahead, land=land, prices=prices)
+            p = plan(graph, ship, forecast, pos, goal, now, target, speeds_kn, tables, max_tries, max_seconds, ahead, land=land, prices=prices,
+                     keep_shortest=False)  # the shortest route's points are not graph cells, where a plan is cut to replan
             if "least_fuel" in p:
                 break
             late = True

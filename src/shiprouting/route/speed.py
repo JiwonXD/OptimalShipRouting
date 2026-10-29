@@ -19,7 +19,8 @@ import numpy as np
 
 from shiprouting.route.fuel import KNOT, FuelCost, fuel_kg, stacked_tables
 from shiprouting.sea.latlon import SearchResult, haversine_km
-from shiprouting.sea.quadtree import Graph, astar, join_legs
+from shiprouting.sea.land import Land
+from shiprouting.sea.quadtree import Graph, along, arcs_on_land, astar, join_legs
 
 
 @dataclass
@@ -101,6 +102,59 @@ class SpeedChoice:
         """Each segment at the slowest offered speed that takes no longer than it did, so the path
         arrives no later: a path smoothed after the search has segments sailed at no offered speed."""
         return dataclasses.replace(r, clock=self.sail(r, self.speed_index(r))[0])
+
+    def shortcut(self, land: Land, r: SearchResult, keep_points=(), piece_km: float = 20.0, step: float = 1.5) -> SearchResult:
+        """Cut the grid's steps out of a path found with edge_cost, keeping the way the weather chose.
+
+        The cells only join in eight directions, so a found path runs in steps even across open
+        sea. From each kept point, go straight to the farthest later point (of a few, each about
+        `step` times farther along the path) whose great-circle arc misses land and, sailed at one
+        offered speed in the weather the path met there, arrives no later than the path did and
+        burns no more fuel. An arc through weather the path went round costs more and is not
+        taken. Arcs are cut into pieces of piece_km at most, each timed as the path's stretch
+        is, in proportion to distance. Links, the two ends and the points at keep_points stay.
+        """
+        n = len(r.lat) - 1
+        lat, lon = r.lat, np.degrees(np.unwrap(np.radians(r.lon)))
+        k = self.speed_index(r)
+        kg, _ = self.segments(r, r.clock[:-1])
+        burnt = np.r_[0.0, np.cumsum(kg[k, np.arange(n)])]
+        fixed = np.zeros(n + 1, bool)
+        fixed[[0, -1, *keep_points]] = True
+        fixed[:-1] |= r.on_link
+        fixed[1:] |= r.on_link
+        pts, on_link, clock = [(lat[0], lon[0])], [], [r.clock[0]]
+        i = 0
+        while i < n:
+            j = i + 1
+            if not r.on_link[i]:
+                stop = i + 1 + int(np.argmax(fixed[i + 1 :]))
+                cand = np.unique(np.r_[np.minimum(i + np.ceil(step ** np.arange(64)).astype(int), stop), stop])
+                cand = cand[~arcs_on_land(land, lat[i], lon[i], lat[cand], lon[cand])][::-1]
+                for c in cand[cand > i + 1]:
+                    km = float(haversine_km(lat[i], lon[i], lat[c], lon[c]))
+                    f = np.arange(int(np.ceil(km / piece_km)) + 1) / int(np.ceil(km / piece_km))
+                    p_lat, p_lon = along(*np.broadcast_arrays(lat[i], lon[i], lat[c], lon[c], f))
+                    p_lon = lon[i] + (p_lon - lon[i] + 180) % 360 - 180
+                    t = r.clock[i] + f * (r.clock[c] - r.clock[i])
+                    kg_s, h_s = self.kg_hours(p_lat[:-1], p_lon[:-1], p_lat[1:], p_lon[1:], t[:-1])
+                    ok = h_s.sum(axis=1) <= (r.clock[c] - r.clock[i]) * (1 + 1e-9)
+                    if ok.any() and kg_s.sum(axis=1)[ok].min() <= burnt[c] - burnt[i]:
+                        pts += zip(p_lat[1:], p_lon[1:])
+                        on_link += [False] * (len(f) - 1)
+                        clock += list(t[1:])
+                        j = None
+                        i = c
+                        break
+            if j is not None:
+                pts.append((lat[j], lon[j]))
+                on_link.append(bool(r.on_link[i]))
+                clock.append(r.clock[j])
+                i = j
+        p_lat, p_lon = np.array(pts).T
+        p_lon = (p_lon + 180) % 360 - 180
+        km = float(haversine_km(p_lat[:-1], p_lon[:-1], p_lat[1:], p_lon[1:]).sum())
+        return dataclasses.replace(r, lat=p_lat, lon=p_lon, on_link=np.array(on_link, bool), km=km, clock=np.array(clock))
 
     def fill_slack(self, r: SearchResult, eta_hours: float, rounds: int = 20) -> SearchResult:
         """Spend the time a found path leaves before eta_hours: step segments down to the next

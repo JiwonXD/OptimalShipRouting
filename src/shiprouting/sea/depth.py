@@ -51,7 +51,10 @@ class LandOrShallow:
         self.tree, self.fraction = land.tree, land.fraction
 
     def shallow(self, lat, lon) -> np.ndarray:
-        return (-self.bathy.elevation(lat, lon) <= self.min_depth) & ~exempted(lat, lon, self.exempt, self.exempt_km)
+        lat, lon = np.broadcast_arrays(np.asarray(lat, float), np.asarray(lon, float))
+        out = np.array(-self.bathy.elevation(lat, lon) <= self.min_depth)
+        out[out] = ~exempted(lat[out], lon[out], self.exempt, self.exempt_km)  # only where shallow: most samples are deep
+        return out
 
     def contains(self, lat, lon) -> np.ndarray:
         return self.land.contains(lat, lon) | self.shallow(lat, lon)
@@ -93,6 +96,71 @@ def link_ends():
     from shiprouting.sea.links import LINKS
 
     return [end for _, a, b, _ in LINKS.values() for end in (a, b)]
+
+
+# Straits whose water deeper than the limit is narrower than the grid's cells, so a cell over
+# them is shallow at its centre and left out: (sea end, sea end), each in water the grid has.
+CHANNELS = {
+    "그레이트벨트": ((56.6, 11.6), (54.6, 11.3)),  # Kattegat to the Fehmarn Belt, the Baltic's deep-water way
+}
+
+
+def channel(bathy, land, name: str, a, b, min_depth: float = 15.0, pad: float = 1.0):
+    """A link from sea end a to b over water deeper than min_depth: the shortest path over the
+    GEBCO cells of the box around the two ends (and pad degrees more) that are deep and off land,
+    then cut to the fewest corners whose straight legs stay over such cells."""
+    from scipy.sparse import coo_matrix
+    from scipy.sparse.csgraph import dijkstra
+
+    from shiprouting.sea.links import Link
+
+    lo, hi = np.minimum(a, b) - pad, np.maximum(a, b) + pad
+    rows = np.arange(*np.round((np.array([lo[0], hi[0]]) - bathy.lat0) / bathy.step).astype(int))
+    cols = np.arange(*np.round((np.array([lo[1], hi[1]]) - bathy.lon0) / bathy.step).astype(int))
+    lat, lon = np.meshgrid(bathy.lat0 + rows * bathy.step, bathy.lon0 + cols * bathy.step, indexing="ij")
+
+    def deep(p_lat, p_lon):
+        p_lat, p_lon = np.ravel(p_lat), np.ravel(p_lon)
+        return (-bathy.elevation(p_lat, p_lon) > min_depth) & ~land.contains(p_lat, p_lon)
+
+    ok = deep(lat, lon).reshape(lat.shape)
+    n, m = ok.shape
+    k = np.arange(n * m).reshape(n, m)
+    i, j = [], []
+    for di, dj in ((0, 1), (1, 0), (1, 1), (1, -1)):
+        x = ok[: n - di, max(0, -dj): m - max(0, dj)] & ok[di:, max(0, dj): m - max(0, -dj)]
+        x &= ok[: n - di, max(0, dj): m - max(0, -dj)] & ok[di:, max(0, -dj): m - max(0, dj)]  # no corner cut over a shallow cell
+        i.append(k[: n - di, max(0, -dj): m - max(0, dj)][x])
+        j.append(k[di:, max(0, dj): m - max(0, -dj)][x])
+    i, j = np.concatenate(i), np.concatenate(j)
+    flat_lat, flat_lon = lat.ravel(), lon.ravel()
+    km = haversine_km(flat_lat[i], flat_lon[i], flat_lat[j], flat_lon[j])
+    s, g = (int(np.argmin(np.where(ok.ravel(), haversine_km(flat_lat, flat_lon, *p), np.inf))) for p in (a, b))
+    dist, parent = dijkstra(coo_matrix((km, (i, j)), shape=(n * m, n * m)).tocsr(), directed=False, indices=s,
+                            return_predecessors=True)
+    if not np.isfinite(dist[g]):
+        raise ValueError(f"{name}: no water deeper than {min_depth:g} m joins the two ends")
+    path = [g]
+    while path[-1] != s:
+        path.append(int(parent[path[-1]]))
+    p_lat, p_lon = flat_lat[path[::-1]], flat_lon[path[::-1]]
+
+    def clear(u, v):
+        """The straight leg sampled every eighth of a cell, each sample with the four points an eighth
+        of a cell either way: a corner clipped between two samples, or a leg running along a cell
+        edge, is then caught, and the great circle (metres off the line) stays over deep cells too."""
+        t = np.linspace(0, 1, int(max(abs(p_lat[v] - p_lat[u]), abs(p_lon[v] - p_lon[u])) / (bathy.step / 8)) + 2)
+        s_lat, s_lon = p_lat[u] + t * (p_lat[v] - p_lat[u]), p_lon[u] + t * (p_lon[v] - p_lon[u])
+        d = bathy.step / 8
+        return all(deep(s_lat + a, s_lon + b).all() for a in (-d, d) for b in (-d, d))
+
+    keep = [0]
+    while keep[-1] < len(path) - 1:  # the farthest point still in a clear straight line (the next one always is)
+        u, v = keep[-1], keep[-1] + 1
+        while v + 1 < len(path) and clear(u, v + 1):
+            v += 1
+        keep.append(v)
+    return Link(name, p_lat[keep], p_lon[keep])
 
 
 def shallowest(bathy: Bathymetry, lat, lon, piece_km: float = 0.25, exempt=(), exempt_km: float = 0.0):

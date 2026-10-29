@@ -76,3 +76,86 @@ def test_water_near_an_exempt_point_is_not_shallow(gebco):
     assert near.contains([0.5, 0.5], [0.5, 179.9]).tolist() == [False, True]
     s = summary(b, [0.5, 0.5], [0.0, 1.0], exempt=[(0.5, 0.5)], exempt_km=30)
     assert s["shallow_legs"] == 0 and s["least_m"] == 40
+
+
+class Bank:
+    """A GEBCO stand-in on 0.025° cells: 100 m deep, but 10 m over a bank at 144–146°E, cut by a 0.05°
+    wide channel 30 m deep just north of the equator."""
+
+    step = 0.025
+    lat0, lon0 = -90 + step / 2, -180 + step / 2
+
+    def elevation(self, lat, lon):
+        lat, lon = np.broadcast_arrays(np.asarray(lat, float), np.asarray(lon, float))
+        bank = (lon >= 144) & (lon <= 146)
+        return np.where(bank & (lat >= 0) & (lat < 0.05), -30, np.where(bank, -10, -100))
+
+
+def test_a_channel_too_narrow_for_the_grid_is_traced_as_a_link():
+    import shapely
+
+    from shiprouting.sea.depth import channel
+    from shiprouting.sea.quadtree import Graph, astar
+
+    land = Land([shapely.box(-180.0, -90.0, 140.0, 90.0), shapely.box(150.0, -90.0, 180.0, 90.0)])
+    a, b = (0.5, 143.0), (0.5, 147.0)
+    cut = Graph.build(land, root=1.0, min_step=0.5, lat_limits=(-5.0, 5.0), bathymetry=Bank())
+    with pytest.raises(ValueError, match="no route"):  # every cell over the bank is 10 m deep at its centre
+        astar(cut, cut.nearest(*a), cut.nearest(*b))
+
+    link = channel(Bank(), land, "해협", a, b, min_depth=15.0)
+    assert (link.lat[0], link.lon[0]) == pytest.approx(a, abs=0.02) and (link.lat[-1], link.lon[-1]) == pytest.approx(b, abs=0.02)
+    f = np.linspace(0, 1, 200)[:, None]  # every leg of the link stays over the channel
+    lat = (link.lat[:-1] + f * (link.lat[1:] - link.lat[:-1])).ravel()
+    lon = (link.lon[:-1] + f * (link.lon[1:] - link.lon[:-1])).ravel()
+    assert (-Bank().elevation(lat, lon) > 15).all()
+    assert len(link.lat) < 10  # cut down to the corners
+
+    joined = Graph.build(land, root=1.0, min_step=0.5, lat_limits=(-5.0, 5.0), bathymetry=Bank(), links=[link])
+    r = astar(joined, joined.nearest(*a), joined.nearest(*b))
+    assert r.links == ["해협"]
+
+
+def test_a_channel_does_not_cut_the_corners_between_deep_cells():
+    import shapely
+
+    from shiprouting.sea.depth import channel
+
+    class Checkers(Bank):  # over the bank, the deep cells meet only at their corners
+        def elevation(self, lat, lon):
+            lat, lon = np.broadcast_arrays(np.asarray(lat, float), np.asarray(lon, float))
+            i, j = np.floor((lat - self.lat0) / self.step + 0.5), np.floor((lon - self.lon0) / self.step + 0.5)
+            bank = (lon >= 144) & (lon <= 146)
+            return np.where(bank & ((i - j) % 2 == 0), -30, np.where(bank, -10, -100))
+
+    land = Land([shapely.box(-180.0, -90.0, 140.0, 90.0), shapely.box(150.0, -90.0, 180.0, 90.0)])
+    with pytest.raises(ValueError, match="no water deeper"):
+        channel(Checkers(), land, "해협", (0.5, 143.0), (0.5, 147.0))
+
+
+
+def test_a_channel_through_scattered_banks_never_clips_a_shallow_cell():
+    import shapely
+
+    from shiprouting.sea.depth import channel
+    from shiprouting.sea.quadtree import along
+
+    shallow = np.random.default_rng(4).random((200, 200)) > 0.7  # 10 m cells scattered over the bank (seed 4 clipped one)
+
+    class Scattered(Bank):
+        def elevation(self, lat, lon):
+            lat, lon = np.broadcast_arrays(np.asarray(lat, float), np.asarray(lon, float))
+            i = np.floor((lat - self.lat0) / self.step + 0.5).astype(int) - 3560
+            j = np.floor((lon - self.lon0) / self.step + 0.5).astype(int) - 12940
+            bank = (lon >= 144) & (lon <= 146)
+            hit = shallow[np.clip(i, 0, 199), np.clip(j, 0, 199)] & (i >= 0) & (i < 200)
+            return np.where(bank & hit, -10, np.where(bank, -30, -100))
+
+    land = Land([shapely.box(-180.0, -90.0, 140.0, 90.0), shapely.box(150.0, -90.0, 180.0, 90.0)])
+    link = channel(Scattered(), land, "해협", (0.0, 143.0), (0.5, 147.0), pad=0.3)
+    f = np.linspace(0, 1, 4000)
+    for a in range(len(link.lat) - 1):  # along the great circle and the straight line, as the depth checks sample them
+        ends = (np.full_like(f, v) for v in (link.lat[a], link.lon[a], link.lat[a + 1], link.lon[a + 1]))
+        straight = (link.lat[a] + f * (link.lat[a + 1] - link.lat[a]), link.lon[a] + f * (link.lon[a + 1] - link.lon[a]))
+        for lat, lon in (along(*ends, f), straight):
+            assert (-Scattered().elevation(lat, lon) > 15).all(), a

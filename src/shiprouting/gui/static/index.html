@@ -1,0 +1,366 @@
+<!doctype html>
+<html lang="ko">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>최적 항로 탐색</title>
+<link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css">
+<script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+<style>
+  :root { --shortest: #1f6feb; --least: #d1495b; --line: #d0d7de; --muted: #57606a; }
+  * { box-sizing: border-box; }
+  body { margin: 0; font: 14px/1.45 system-ui, sans-serif; display: flex; height: 100vh; background: #fff; color: #1f2328; }
+  #map { flex: 1; }
+  aside { width: 340px; padding: 14px; overflow-y: auto; border-left: 1px solid var(--line); }
+  h1 { font-size: 17px; margin: 0 0 10px; }
+  fieldset { border: 1px solid var(--line); border-radius: 6px; margin: 0 0 10px; padding: 8px 10px; min-width: 0; }
+  legend { color: var(--muted); padding: 0 4px; }
+  label { display: block; margin: 3px 0; }
+  input[type=datetime-local] { width: 100%; }
+  button { width: 100%; padding: 8px; margin: 4px 0; border: 0; border-radius: 6px; color: #fff; font-weight: 600; cursor: pointer; }
+  button:disabled { opacity: .5; cursor: default; }
+  #find { background: #1f6feb; }
+  #clear { background: #6e7781; }
+  #map.leaflet-container { cursor: crosshair; }
+  .stop { display: flex; align-items: center; gap: 6px; margin: 4px 0; padding: 2px 4px; border-radius: 6px; }
+  .stop.active { background: #ddf4ff; }
+  .stop input { flex: 1; min-width: 0; padding: 5px 6px; border: 1px solid var(--line); border-radius: 5px; font: inherit; }
+  .stop input.bad { border-color: #cf222e; }
+  .icon { width: auto; padding: 2px 6px; margin: 0; background: none; color: var(--muted); font-weight: 400; }
+  .icon:hover { background: #eaeef2; }
+  .pin { flex: none; width: 22px; height: 22px; border-radius: 50%; color: #fff; font: 600 11px/22px system-ui, sans-serif;
+         text-align: center; border: 2px solid #fff; box-shadow: 0 1px 3px rgba(0,0,0,.45); }
+  .pin.start { background: #1a7f37; } .pin.via { background: #9a6700; } .pin.goal { background: #cf222e; }
+  .stop-actions { display: flex; gap: 6px; margin-top: 4px; }
+  .stop-actions button { flex: 1; background: #eaeef2; color: #1f2328; font-weight: 500; padding: 6px; margin: 0; }
+  #hint { color: var(--muted); margin: 6px 2px 0; font-size: 13px; }
+  .menu button { display: block; width: 100%; margin: 2px 0; padding: 5px 10px; text-align: left; background: none; color: #1f2328; font-weight: 500; }
+  .menu button:hover { background: #eaeef2; }
+  .stale { color: #9a6700; }
+  #status { white-space: pre-wrap; font: 12px/1.4 ui-monospace, monospace; color: var(--muted); max-height: 160px; overflow-y: auto; }
+  table { border-collapse: collapse; width: 100%; margin-top: 6px; }
+  td, th { border-bottom: 1px solid var(--line); padding: 3px 4px; text-align: right; }
+  th:first-child, td:first-child { text-align: left; }
+  .swatch { display: inline-block; width: 10px; height: 10px; border-radius: 2px; margin-right: 4px; }
+</style>
+</head>
+<body>
+<div id="map"></div>
+<aside>
+  <h1>최적 항로 탐색</h1>
+  <fieldset>
+    <legend>경로</legend>
+    <div id="stops"></div>
+    <div class="stop-actions">
+      <button id="add-via" title="지도를 클릭하거나 항구 이름을 넣어 경유지를 정해요">+ 경유지</button>
+      <button id="swap" title="출발지와 도착지를 바꿔요">⇅ 출발↔도착</button>
+    </div>
+    <p id="hint"></p>
+    <datalist id="ports"></datalist>
+  </fieldset>
+  <fieldset>
+    <legend>시각 (UTC)</legend>
+    <label>출발 <input type="datetime-local" id="departure"></label>
+    <label>도착 기한 <input type="datetime-local" id="deadline"></label>
+    <div id="forecast" style="color: var(--muted)"></div>
+  </fieldset>
+  <button id="find" title="최단 경로와 최적 경로를 함께 찾아요">경로 탐색</button>
+  <button id="clear">모두 지우기</button>
+  <div id="summary"></div>
+  <div id="status"></div>
+</aside>
+<script>
+const SHORTEST = "#1f6feb", LEAST = "#d1495b";  // also --shortest and --least above
+const map = L.map("map", { worldCopyJump: true }).setView([30, 160], 3);
+L.tileLayer("https://tile.openstreetmap.org/{z}/{x}/{y}.png", {
+  maxZoom: 10, attribution: "&copy; OpenStreetMap contributors",
+}).addTo(map);
+const depth = L.tileLayer.wms("https://wms.gebco.net/mapserv?", {
+  layers: "GEBCO_LATEST", format: "image/png", transparent: true, opacity: 0.5,
+  attribution: "GEBCO Compilation Group (2026) GEBCO 2026 Grid",
+});
+L.control.layers(null, { "수심 (GEBCO)": depth }).addTo(map);
+
+// Approximate public positions of some ports; the search moves each to the nearest sea cell.
+const PORTS = [
+  ["부산", "Busan", 35.05, 129.10], ["인천", "Incheon", 37.40, 126.45], ["광양", "Gwangyang", 34.85, 127.75],
+  ["울산", "Ulsan", 35.45, 129.42], ["상하이", "Shanghai", 30.60, 122.10], ["닝보", "Ningbo", 29.93, 122.05],
+  ["칭다오", "Qingdao", 36.00, 120.35], ["톈진", "Tianjin", 38.95, 117.90], ["홍콩", "Hong Kong", 22.25, 114.15],
+  ["선전", "Shenzhen", 22.45, 113.85], ["가오슝", "Kaohsiung", 22.55, 120.25], ["도쿄", "Tokyo", 35.40, 139.80],
+  ["고베", "Kobe", 34.62, 135.25], ["싱가포르", "Singapore", 1.22, 103.85], ["포트클랑", "Port Klang", 2.95, 101.30],
+  ["콜롬보", "Colombo", 6.95, 79.82], ["뭄바이", "Mumbai", 18.90, 72.80], ["제벨알리", "Jebel Ali", 25.05, 55.00],
+  ["제다", "Jeddah", 21.45, 39.10], ["피레우스", "Piraeus", 37.92, 23.60], ["이스탄불", "Istanbul", 40.98, 28.98],
+  ["알헤시라스", "Algeciras", 36.10, -5.40], ["르아브르", "Le Havre", 49.50, 0.05], ["펠릭스토우", "Felixstowe", 51.93, 1.40],
+  ["로테르담", "Rotterdam", 51.98, 3.95], ["뉴욕", "New York", 40.45, -73.80, "NYC"], ["사바나", "Savannah", 31.95, -80.80],
+  ["휴스턴", "Houston", 29.30, -94.70], ["파나마 발보아", "Balboa", 8.85, -79.50], ["로스앤젤레스", "Los Angeles", 33.70, -118.27, "LA 엘에이"],
+  ["시애틀", "Seattle", 47.62, -122.40], ["밴쿠버", "Vancouver", 49.30, -123.20], ["호놀룰루", "Honolulu", 21.28, -157.88],
+  ["산투스", "Santos", -24.00, -46.30], ["케이프타운", "Cape Town", -33.88, 18.40], ["더반", "Durban", -29.88, 31.08],
+  ["시드니", "Sydney", -33.85, 151.30], ["멜버른", "Melbourne", -38.30, 144.70], ["오클랜드", "Auckland", -36.82, 174.80],
+];
+document.getElementById("ports").innerHTML = PORTS.map(([ko, en]) => `<option value="${ko} (${en})">`).join("");
+
+// The stops in order: start, waypoints, goal. Each {lat, lon, name} or null while not set.
+const stops = [null, null];
+let active = null;  // index the next click on the map fills; null: the first empty one
+const markers = L.layerGroup().addTo(map);
+const routes = L.layerGroup().addTo(map);
+let drawn = false;  // routes are on the map for the stops as they were
+
+const kind = i => i === 0 ? "start" : i === stops.length - 1 ? "goal" : "via";
+const label = i => ({ start: "출발", goal: "도착", via: `경유 ${i}` })[kind(i)];
+const pinText = i => ({ start: "출", goal: "도", via: String(i) })[kind(i)];
+const fmt = p => p.name || `${p.lat.toFixed(3)}, ${p.lon.toFixed(3)}`;
+const target = () => active !== null && active < stops.length ? active : (stops.indexOf(null) >= 0 ? stops.indexOf(null) : null);
+
+function render() {
+  markers.clearLayers();
+  // Each within 180° of the stop before, like the routes (unwrap), so both are drawn on the same copy of the world.
+  let ref = stops[0] ? stops[0].lon : map.getCenter().lng;
+  stops.forEach((p, i) => {
+    if (!p) return;
+    const lon = p.lon + 360 * Math.round((ref - p.lon) / 360);
+    ref = lon;
+    const icon = L.divIcon({ className: "", html: `<div class="pin ${kind(i)}">${pinText(i)}</div>`, iconSize: [26, 26], iconAnchor: [13, 13] });
+    L.marker([p.lat, lon], { icon, draggable: true, title: `${label(i)}: ${fmt(p)} (끌어서 옮기기)` })
+      .on("dragend", e => { const q = e.target.getLatLng().wrap(); set(i, { lat: q.lat, lon: q.lng }); })
+      .addTo(markers);
+  });
+  const t = target();
+  document.getElementById("stops").innerHTML = stops.map((p, i) => `
+    <div class="stop${i === t ? " active" : ""}" data-i="${i}">
+      <span class="pin ${kind(i)}">${pinText(i)}</span>
+      <input list="ports" value="${p ? fmt(p) : ""}" placeholder="${label(i)}: 지도 클릭, 항구 이름, 또는 위도, 경도">
+      ${kind(i) === "via" ? `<button class="icon up" title="앞으로">↑</button><button class="icon down" title="뒤로">↓</button>` : ""}
+      <button class="icon del" title="지우기">×</button>
+    </div>`).join("");
+  document.querySelectorAll(".stop").forEach(row => {
+    const i = +row.dataset.i, input = row.querySelector("input");
+    input.onfocus = () => { active = i; document.querySelectorAll(".stop").forEach(r => r.classList.toggle("active", r === row)); hint(); };
+    input.onchange = () => {
+      const p = parse(input.value);
+      if (p) { set(i, p, true); } else if (input.value.trim()) { input.classList.add("bad"); hint("항구 이름이나 \"위도, 경도\"를 찾을 수 없어요."); }
+      else { remove(i); }
+    };
+    input.onkeydown = e => { if (e.key === "Enter") input.blur(); };
+    row.querySelector(".del").onclick = () => remove(i);
+    const up = row.querySelector(".up"), down = row.querySelector(".down");
+    if (up) up.onclick = () => move(i, -1);
+    if (down) down.onclick = () => move(i, +1);
+  });
+  hint();
+}
+
+function hint(text) {
+  const t = target();
+  document.getElementById("hint").textContent = text ||
+    (t !== null ? `지도를 클릭해 ${({ start: "출발지", goal: "도착지", via: "경유지" })[kind(t)]}를 정하세요.`
+                : "지점은 끌어서 옮기고, 지도를 클릭하면 출발·경유·도착을 고를 수 있어요.");
+}
+
+function parse(text) {
+  const m = text.match(/^\s*(-?\d+(?:\.\d+)?)\s*[,\s]\s*(-?\d+(?:\.\d+)?)\s*$/);
+  if (m && Math.abs(+m[1]) <= 90) return { lat: +m[1], lon: ((+m[2] + 540) % 360) - 180 };
+  const q = text.trim().toLowerCase().replace(/\s*\(.*\)$/, "");
+  if (!q) return null;
+  const names = ([ko, en, , , also = ""]) => [ko, en.toLowerCase(), ...also.toLowerCase().split(" ").filter(Boolean)];
+  const port = PORTS.find(x => names(x).some(n => n === q)) || PORTS.find(x => names(x).some(n => n.startsWith(q))) ||
+               PORTS.find(x => names(x).some(n => n.includes(q)));
+  return port && { lat: port[2], lon: port[3], name: port[0] };
+}
+
+function changed() {
+  active = null;
+  if (drawn) {
+    routes.eachLayer(l => l.setStyle({ opacity: 0.35, dashArray: "6 8" }));
+    if (!document.querySelector("#summary .stale"))
+      document.getElementById("summary").insertAdjacentHTML("afterbegin", `<p class="stale">지점이 바뀌었어요. 다시 탐색하면 새 경로가 나와요.</p>`);
+  }
+  render();
+}
+
+function set(i, p, show) {
+  stops[i] = p;
+  changed();
+  if (show && !map.getBounds().contains([p.lat, p.lon])) map.panTo([p.lat, p.lon]);
+}
+
+function remove(i) {
+  if (kind(i) === "via") stops.splice(i, 1); else stops[i] = null;
+  changed();
+}
+
+function move(i, d) {
+  const j = i + d;
+  if (j < 1 || j > stops.length - 2) return;
+  [stops[i], stops[j]] = [stops[j], stops[i]];
+  changed();
+}
+
+// A waypoint goes where it adds the least distance, as navigation apps do; ↑ ↓ change the order.
+function addVia(p) {
+  const km = (a, b) => {
+    const r = Math.PI / 180, x = Math.sin((b.lat - a.lat) * r / 2) ** 2 +
+      Math.cos(a.lat * r) * Math.cos(b.lat * r) * Math.sin((b.lon - a.lon) * r / 2) ** 2;
+    return 12742 * Math.asin(Math.sqrt(x));
+  };
+  let at = stops.length - 1, best = Infinity;
+  for (let i = 1; i < stops.length; i++) {
+    const a = stops[i - 1], b = stops[i];
+    if (!a || !b) continue;
+    const extra = km(a, p) + km(p, b) - km(a, b);
+    if (extra < best) { best = extra; at = i; }
+  }
+  stops.splice(at, 0, p);
+  changed();
+}
+
+const menu = L.popup({ closeButton: false, className: "menu", minWidth: 130 });
+function openMenu(latlng) {
+  const p = { lat: latlng.wrap().lat, lon: latlng.wrap().lng };
+  const div = L.DomUtil.create("div", "menu");
+  const item = (text, act) => { const b = L.DomUtil.create("button", "", div); b.textContent = text; b.onclick = () => { map.closePopup(menu); act(); }; };
+  item("여기서 출발", () => set(0, p));
+  if (stops[0] && stops[stops.length - 1]) item("경유지로 추가", () => addVia(p));
+  item("여기로 도착", () => set(stops.length - 1, p));
+  menu.setLatLng(latlng).setContent(div).openOn(map);
+}
+
+map.on("click", e => {
+  const t = target();
+  if (t === null) { openMenu(e.latlng); return; }
+  set(t, { lat: e.latlng.wrap().lat, lon: e.latlng.wrap().lng });
+});
+map.on("contextmenu", e => openMenu(e.latlng));
+document.addEventListener("keydown", e => { if (e.key === "Escape") { map.closePopup(); active = null; render(); } });
+
+document.getElementById("add-via").onclick = () => {
+  stops.splice(stops.length - 1, 0, null);
+  active = stops.length - 2;
+  render();
+  document.querySelector(`.stop[data-i="${active}"] input`).focus();
+};
+document.getElementById("swap").onclick = () => { stops.reverse(); changed(); };
+document.getElementById("clear").onclick = () => {
+  stops.splice(0, stops.length, null, null);
+  routes.clearLayers(); drawn = false; active = null; render();
+  document.getElementById("summary").innerHTML = document.getElementById("status").textContent = "";
+};
+render();
+
+// Longitudes kept within 180° of the point before, so a route across the date line is drawn across it.
+function unwrap(lat, lon) {
+  const out = [];
+  let prev = lon[0];
+  for (let i = 0; i < lat.length; i++) {
+    let x = lon[i];
+    while (x - prev > 180) x -= 360;
+    while (x - prev < -180) x += 360;
+    out.push([lat[i], x]); prev = x;
+  }
+  return out;
+}
+
+const iso = s => s.slice(0, 16);
+fetch("/api/info").then(r => r.json()).then(info => {
+  const start = new Date(info.forecast_start + "Z");
+  const departure = document.getElementById("departure");
+  departure.value = departure.min = iso(info.forecast_start);
+  departure.max = iso(info.forecast_end);
+  const deadline = document.getElementById("deadline");
+  deadline.value = iso(new Date(start.getTime() + 30 * 86400e3).toISOString());  // long enough for Europe at about 15 kn
+  // A new departure moves the deadline with it, keeping the voyage time as it was.
+  let last = departure.value;
+  departure.onchange = () => {
+    const ms = s => new Date(s + "Z").getTime();
+    if (departure.value && last && deadline.value) deadline.value = iso(new Date(ms(deadline.value) + ms(departure.value) - ms(last)).toISOString());
+    last = departure.value;
+  };
+  document.getElementById("forecast").textContent = `예보 ${iso(info.forecast_start)} ~ ${iso(info.forecast_end)}` +
+    (info.runs ? ` (매일 00시 회차 ${info.runs}개, 출발 직전에 나온 회차로 계산)` : "");
+});
+
+function row(name, color, r) {
+  const kn = Object.entries(r.speeds_kn).map(([k, n]) => `${k}×${n}`).join(", ");
+  return `<tr><td><span class="swatch" style="background:${color}"></span>${name}</td>
+    <td>${r.km.toFixed(0)} km</td><td>${r.hours.toFixed(1)} h</td><td>${r.fuel_t.toFixed(2)} t</td></tr>
+    <tr><td colspan="4" style="color:var(--muted)">속력(노트×구간): ${kn}${r.links.length ? " · " + r.links.join(", ") : ""}</td></tr>`;
+}
+
+function show(out) {
+  routes.clearLayers();
+  const parts = [];
+  if (out.error) parts.push(`<p style="color:#cf222e">${out.error}</p>`);
+  if (out.shortest) {
+    L.polyline(unwrap(out.shortest.lat, out.shortest.lon), { color: SHORTEST, weight: 3 }).addTo(routes);
+    parts.push(row("최단", SHORTEST, out.shortest));
+  }
+  if (out.least_fuel) {
+    L.polyline(unwrap(out.least_fuel.lat, out.least_fuel.lon), { color: LEAST, weight: 3 }).addTo(routes);
+    parts.push(row("최적", LEAST, out.least_fuel));
+  }
+  const lines = routes.getLayers();
+  drawn = lines.length > 0;
+  if (drawn) map.fitBounds(L.featureGroup(lines).getBounds(), { padding: [30, 30] });
+  let html = parts.filter(p => p.startsWith("<p")).join("");
+  const rows = parts.filter(p => !p.startsWith("<p")).join("");
+  if (rows) html += `<table><tr><th></th><th>거리</th><th>시간</th><th>연료</th></tr>${rows}</table>`;
+  if (out.saving_t !== undefined) html += `<p><b>절감 ${out.saving_t.toFixed(2)} t (${out.saving_pct.toFixed(2)}%)</b></p>`;
+  if (out.least_fuel && out.least_fuel.is_shortest) html += `<p style="color:var(--muted)">속력과 경로를 골라 찾은 것이 최단 경로보다 연료를 더 써서, 최단 경로를 그대로 최적으로 냈어요.</p>`;
+  const sailed = Math.max(...[out.shortest, out.least_fuel].filter(r => r).map(r => r.hours));
+  if (out.forecast_hours !== undefined && sailed > out.forecast_hours) {
+    const past = sailed - Math.max(out.forecast_hours, 0);
+    html += `<p class="stale">항해 ${sailed.toFixed(0)}시간 중 ${past.toFixed(0)}시간(${(100 * past / sailed).toFixed(0)}%)은 예보가 끝난 뒤라 ` +
+      `마지막 예보 시각의 날씨로 계산했어요. 그 구간의 연료와 절감은 실제와 많이 다를 수 있어요.</p>`;
+  }
+  if (out.run) html += `<p style="color:var(--muted)">예보 회차: ${iso(out.run)} 발표</p>`;
+  if (out.moved_km && out.moved_km.some(km => km > 1)) html += `<p style="color:var(--muted)">가장 가까운 바다 칸으로 옮김: ${out.moved_km.join(", ")} km</p>`;
+  document.getElementById("summary").innerHTML = html;
+}
+
+async function find(kind) {
+  const given = stops.filter(p => p);
+  if (!stops[0] || !stops[stops.length - 1]) { alertBox("출발지와 도착지를 먼저 정해 주세요."); return; }
+  const at = p => [p.lat, p.lon];
+  const body = {
+    kind, start: at(given[0]), goal: at(given[given.length - 1]), via: given.slice(1, -1).map(at),
+    departure: document.getElementById("departure").value, deadline: document.getElementById("deadline").value,
+  };
+  let job, error;
+  try {
+    ({ job, error } = await (await fetch("/api/plan", { method: "POST", body: JSON.stringify(body) })).json());
+  } catch (e) {
+    alertBox("서버에 닿지 않아요. 서버가 켜져 있는지 확인해 주세요.");
+    return;
+  }
+  if (!job) { alertBox(error); return; }
+  setBusy(true);
+  const status = document.getElementById("status");
+  const t0 = Date.now();
+  const poll = async () => {
+    let j;
+    try {
+      const res = await fetch(`/api/jobs/${job}`);
+      if (!res.ok) throw new Error(res.status);
+      j = await res.json();
+    } catch (e) {  // the server stopped or was restarted, and the search with it
+      setBusy(false);
+      status.textContent = "";
+      alertBox("서버와 연결이 끊겨 탐색이 멈췄어요. 서버가 켜져 있는지 확인하고 다시 탐색해 주세요.");
+      return;
+    }
+    status.textContent = `탐색 중 ${((Date.now() - t0) / 1000).toFixed(0)}초\n` + j.log.join("\n");
+    status.scrollTop = status.scrollHeight;
+    if (j.state === "running") { setTimeout(poll, 2000); return; }
+    setBusy(false);
+    status.textContent = `끝 (${j.seconds}초)\n` + j.log.join("\n");
+    show(j.error ? { error: j.error } : j.result);
+  };
+  poll();
+}
+
+function alertBox(text) { document.getElementById("summary").innerHTML = `<p style="color:#cf222e">${text}</p>`; }
+function setBusy(busy) { document.getElementById("find").disabled = busy; }
+document.getElementById("find").onclick = () => find("least_fuel");  // the least-fuel plan finds the shortest route first
+</script>
+</body>
+</html>
