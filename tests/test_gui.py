@@ -56,6 +56,15 @@ def test_the_planner_returns_the_routes_the_page_draws():
     assert both["least_fuel"]["fuel_t"] <= both["shortest"]["fuel_t"] and "tries" not in both
 
 
+def test_a_departure_before_the_first_run_is_reported():
+    def newest(t):
+        raise ValueError(f"no run out by {t}")
+
+    run = planner(GRAPH, LAND, types.SimpleNamespace(newest=newest), KCS_SHIP)
+    out = run({"start": START, "goal": GOAL, "departure": str(T0), "deadline": str(T0 + np.timedelta64(40, "h")), "kind": "shortest"})
+    assert "예보" in out["error"] and "shortest" not in out
+
+
 def test_the_page_and_a_search_are_served():
     jobs = Jobs(lambda request: {"echo": request["start"]})
     server = ThreadingHTTPServer(("127.0.0.1", 0), handler(jobs, {"forecast_start": str(T0)}))
@@ -68,6 +77,11 @@ def test_the_page_and_a_search_are_served():
         key = json.load(urllib.request.urlopen(post))["job"]
         wait(jobs, key)
         assert json.load(urllib.request.urlopen(f"{url}/api/jobs/{key}"))["result"] == {"echo": [1, 2]}
+        try:
+            urllib.request.urlopen(urllib.request.Request(url + "/api/plan", data=b"{not json", method="POST"))
+            raise AssertionError("expected 400")
+        except urllib.error.HTTPError as e:
+            assert e.code == 400 and "error" in json.load(e)
         try:
             urllib.request.urlopen(url + "/api/jobs/nope")
             raise AssertionError("expected 404")

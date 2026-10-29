@@ -42,7 +42,51 @@ def test_both_routes_arrive_by_the_deadline_and_the_least_fuel_one_takes_no_more
 
 def test_a_deadline_too_close_is_reported():
     out = plan(10.0)
-    assert "cannot be met" in out["error"] and "shortest" not in out
+    assert "맞출 수 없어요" in out["error"] and "shortest" not in out
+
+
+@pytest.mark.parametrize("hours", [0.0, -10.0])
+def test_a_deadline_not_after_the_departure_is_reported(hours):
+    out = plan(hours)
+    assert "출발 시각보다 뒤" in out["error"] and "shortest" not in out
+
+
+def test_a_departure_outside_the_forecast_is_reported():
+    fc = forecast(wind_u=-10.0, Hs=2.0, wave_from_x=1.0, T_m10=8.0)
+    out = plan_module.plan(GRAPH, KCS_SHIP, fc, START, GOAL, T0 - np.timedelta64(5, "h"), T0 + np.timedelta64(25, "h"))
+    assert "예보 범위" in out["error"] and "shortest" not in out
+
+
+@pytest.mark.parametrize("goal", [START, (START[0] + 0.1, START[1] + 0.1)])
+def test_a_start_and_goal_in_the_same_cell_are_reported(goal):
+    fc = forecast(wind_u=-10.0, Hs=2.0, wave_from_x=1.0, T_m10=8.0)
+    out = plan_module.plan(GRAPH, KCS_SHIP, fc, START, goal, T0, T0 + np.timedelta64(25, "h"), (12, 16, 20))
+    assert "같은 바다 칸" in out["error"] and "shortest" not in out
+
+
+@pytest.mark.parametrize("legs", ["distance", "shared"])
+def test_a_waypoint_given_twice_or_on_the_start_is_passed_as_once(legs):
+    once = plan(70.0, via=[(4.5, 152.5)], legs=legs)
+    for via in ([(4.5, 152.5), (4.5, 152.5)], [START, (4.5, 152.5)], [(4.5, 152.5), GOAL]):
+        out = plan(70.0, via=via, legs=legs)
+        for key in ("shortest", "least_fuel"):
+            assert out[key]["km"] == pytest.approx(once[key]["km"], abs=1.0)
+        assert len(out["least_fuel"]["legs"]) == len(via) + 1  # one per leg asked for, an empty one too
+
+
+@pytest.mark.parametrize("point, word", [((30.5, 100.5), "출발지"), ((95.0, 400.0), "위도")])
+def test_a_start_far_from_the_sea_is_refused(point, word):
+    fc = forecast(wind_u=-10.0, Hs=2.0, wave_from_x=1.0, T_m10=8.0)
+    out = plan_module.plan(GRAPH, KCS_SHIP, fc, point, GOAL, T0, T0 + np.timedelta64(25, "h"), (12, 16, 20))
+    assert word in out["error"] and "shortest" not in out
+
+
+def test_water_with_no_way_out_is_reported():
+    ring = Land([shapely.box(140.0, -10.0, 150.0, 10.0).difference(shapely.box(143.0, -7.0, 147.0, 7.0))])
+    graph = Graph.build(ring, root=1.0, min_step=0.5, lat_limits=(-20.0, 20.0))
+    fc = forecast(wind_u=-10.0, Hs=2.0, wave_from_x=1.0, T_m10=8.0)
+    out = plan_module.plan(graph, KCS_SHIP, fc, (0.5, 145.5), GOAL, T0, T0 + np.timedelta64(80, "h"), (12, 16, 20))
+    assert "바닷길이 없어요" in out["error"] and "shortest" not in out
 
 
 def test_a_far_deadline_sails_the_shortest_route_at_the_slowest_speed():

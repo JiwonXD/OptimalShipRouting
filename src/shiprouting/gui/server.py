@@ -76,7 +76,10 @@ def planner(graph, land, runs, ship, tables: str | None = None):
 
     def run(request: dict) -> dict:
         t0 = time.perf_counter()
-        at, forecast = runs.newest(np.datetime64(request["departure"], "s"))
+        try:
+            at, forecast = runs.newest(np.datetime64(request["departure"], "s"))
+        except ValueError:  # no run out yet
+            return {"error": f"출발 시각 {request['departure']}보다 먼저 나온 예보가 없어요."}
         print(f"forecast run {at} ready in {time.perf_counter() - t0:.0f} s", flush=True)
         out = plan(graph, ship, forecast, tuple(request["start"]), tuple(request["goal"]), request["departure"],
                    request["deadline"], tables=tables, via=[tuple(p) for p in request.get("via", [])], land=land,
@@ -109,7 +112,10 @@ def handler(jobs: Jobs, info: dict):
         def do_POST(self):
             if self.path != "/api/plan":
                 return self.json(404, {"error": "not found"})
-            request = json.loads(self.rfile.read(int(self.headers["Content-Length"])))
+            try:
+                request = json.loads(self.rfile.read(int(self.headers.get("Content-Length", 0))))
+            except ValueError:
+                return self.json(400, {"error": "요청을 JSON으로 읽을 수 없어요."})
             key = jobs.start(request)
             self.json(202, {"job": key}) if key else self.json(409, {"error": "a search is already running"})
 

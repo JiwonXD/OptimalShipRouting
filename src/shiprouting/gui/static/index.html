@@ -266,7 +266,15 @@ fetch("/api/info").then(r => r.json()).then(info => {
   const departure = document.getElementById("departure");
   departure.value = departure.min = iso(info.forecast_start);
   departure.max = iso(info.forecast_end);
-  document.getElementById("deadline").value = iso(new Date(start.getTime() + 30 * 86400e3).toISOString());  // long enough for Europe at about 15 kn
+  const deadline = document.getElementById("deadline");
+  deadline.value = iso(new Date(start.getTime() + 30 * 86400e3).toISOString());  // long enough for Europe at about 15 kn
+  // A new departure moves the deadline with it, keeping the voyage time as it was.
+  let last = departure.value;
+  departure.onchange = () => {
+    const ms = s => new Date(s + "Z").getTime();
+    if (departure.value && last && deadline.value) deadline.value = iso(new Date(ms(deadline.value) + ms(departure.value) - ms(last)).toISOString());
+    last = departure.value;
+  };
   document.getElementById("forecast").textContent = `예보 ${iso(info.forecast_start)} ~ ${iso(info.forecast_end)}` +
     (info.runs ? ` (매일 00시 회차 ${info.runs}개, 출발 직전에 나온 회차로 계산)` : "");
 });
@@ -310,14 +318,29 @@ async function find(kind) {
     kind, start: at(given[0]), goal: at(given[given.length - 1]), via: given.slice(1, -1).map(at),
     departure: document.getElementById("departure").value, deadline: document.getElementById("deadline").value,
   };
-  const res = await fetch("/api/plan", { method: "POST", body: JSON.stringify(body) });
-  const { job, error } = await res.json();
+  let job, error;
+  try {
+    ({ job, error } = await (await fetch("/api/plan", { method: "POST", body: JSON.stringify(body) })).json());
+  } catch (e) {
+    alertBox("서버에 닿지 않아요. 서버가 켜져 있는지 확인해 주세요.");
+    return;
+  }
   if (!job) { alertBox(error); return; }
   setBusy(true);
   const status = document.getElementById("status");
   const t0 = Date.now();
   const poll = async () => {
-    const j = await (await fetch(`/api/jobs/${job}`)).json();
+    let j;
+    try {
+      const res = await fetch(`/api/jobs/${job}`);
+      if (!res.ok) throw new Error(res.status);
+      j = await res.json();
+    } catch (e) {  // the server stopped or was restarted, and the search with it
+      setBusy(false);
+      status.textContent = "";
+      alertBox("서버와 연결이 끊겨 탐색이 멈췄어요. 서버가 켜져 있는지 확인하고 다시 탐색해 주세요.");
+      return;
+    }
     status.textContent = `탐색 중 ${((Date.now() - t0) / 1000).toFixed(0)}초\n` + j.log.join("\n");
     status.scrollTop = status.scrollHeight;
     if (j.state === "running") { setTimeout(poll, 2000); return; }

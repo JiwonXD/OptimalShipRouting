@@ -249,9 +249,10 @@ def astar(
 
 def join_legs(legs: list[SearchResult]) -> SearchResult:
     """The legs as one path, each leg's clock carrying on from where the last one ended."""
-    clock = [legs[0].clock]
+    clock, end = [legs[0].clock], legs[0].clock[-1]
     for r in legs[1:]:
-        clock.append(r.clock[1:] - r.clock[0] + clock[-1][-1])
+        clock.append(r.clock[1:] - r.clock[0] + end)
+        end = clock[-1][-1] if len(r.clock) > 1 else end  # a leg of one point adds none
     return SearchResult(
         np.concatenate([legs[0].lat] + [r.lat[1:] for r in legs[1:]]),
         np.concatenate([legs[0].lon] + [r.lon[1:] for r in legs[1:]]),
