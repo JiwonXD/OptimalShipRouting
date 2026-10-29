@@ -114,3 +114,20 @@ def test_a_channel_too_narrow_for_the_grid_is_traced_as_a_link():
     joined = Graph.build(land, root=1.0, min_step=0.5, lat_limits=(-5.0, 5.0), bathymetry=Bank(), links=[link])
     r = astar(joined, joined.nearest(*a), joined.nearest(*b))
     assert r.links == ["해협"]
+
+
+def test_a_channel_does_not_cut_the_corners_between_deep_cells():
+    import shapely
+
+    from shiprouting.sea.depth import channel
+
+    class Checkers(Bank):  # over the bank, the deep cells meet only at their corners
+        def elevation(self, lat, lon):
+            lat, lon = np.broadcast_arrays(np.asarray(lat, float), np.asarray(lon, float))
+            i, j = np.floor((lat - self.lat0) / self.step + 0.5), np.floor((lon - self.lon0) / self.step + 0.5)
+            bank = (lon >= 144) & (lon <= 146)
+            return np.where(bank & ((i - j) % 2 == 0), -30, np.where(bank, -10, -100))
+
+    land = Land([shapely.box(-180.0, -90.0, 140.0, 90.0), shapely.box(150.0, -90.0, 180.0, 90.0)])
+    with pytest.raises(ValueError, match="no water deeper"):
+        channel(Checkers(), land, "해협", (0.5, 143.0), (0.5, 147.0))

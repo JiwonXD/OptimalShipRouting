@@ -129,6 +129,7 @@ def channel(bathy, land, name: str, a, b, min_depth: float = 15.0, pad: float = 
     i, j = [], []
     for di, dj in ((0, 1), (1, 0), (1, 1), (1, -1)):
         x = ok[: n - di, max(0, -dj): m - max(0, dj)] & ok[di:, max(0, dj): m - max(0, -dj)]
+        x &= ok[: n - di, max(0, dj): m - max(0, -dj)] & ok[di:, max(0, -dj): m - max(0, dj)]  # no corner cut over a shallow cell
         i.append(k[: n - di, max(0, -dj): m - max(0, dj)][x])
         j.append(k[di:, max(0, dj): m - max(0, -dj)][x])
     i, j = np.concatenate(i), np.concatenate(j)
@@ -149,7 +150,7 @@ def channel(bathy, land, name: str, a, b, min_depth: float = 15.0, pad: float = 
         return deep(p_lat[u] + t * (p_lat[v] - p_lat[u]), p_lon[u] + t * (p_lon[v] - p_lon[u])).all()
 
     keep = [0]
-    while keep[-1] < len(path) - 1:  # the farthest point still in a clear straight line
+    while keep[-1] < len(path) - 1:  # the farthest point still in a clear straight line (the next one always is)
         u, v = keep[-1], keep[-1] + 1
         while v + 1 < len(path) and clear(u, v + 1):
             v += 1
