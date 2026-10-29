@@ -160,3 +160,21 @@ def test_the_least_fuel_route_keeps_going_round_a_storm():
     lat, lon = np.array(r["lat"]), np.array(r["lon"])
     assert not ((np.abs(lat - 0.5) < 2.5) & (lon > 155) & (lon < 160)).any()  # round it, not through
     assert r["fuel_t"] < out["shortest"]["fuel_t"]
+
+
+def test_the_shortest_route_is_kept_when_the_search_finds_nothing_better(monkeypatch):
+    import dataclasses
+
+    fill = plan_module.SpeedChoice.fill_slack
+    monkeypatch.setattr(plan_module.SpeedChoice, "fill_slack", lambda self, r, eta: dataclasses.replace(fill(self, r, eta), cost=1e9))
+    via = [(4.5, 152.5)]
+    out = plan(70.0, via=via, land=LAND)
+    short, best = out["shortest"], out["least_fuel"]
+    assert best["is_shortest"] and best["fuel_t"] == short["fuel_t"] and best["lat"] == short["lat"]
+    assert out["saving_t"] == 0.0
+    assert len(best["legs"]) == 2 and sum(leg["hours"] for leg in best["legs"]) == pytest.approx(short["hours"], abs=0.2)
+
+
+def test_the_hours_the_forecast_covers_are_given():
+    out = plan(25.0)
+    assert out["forecast_hours"] == pytest.approx(6.0)  # the test forecast runs 6 h past the departure

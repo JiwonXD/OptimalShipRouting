@@ -22,6 +22,7 @@ so the shortest route's one speed through the water is adjusted until it arrives
 deadline.
 """
 
+import dataclasses
 import math
 import time
 
@@ -41,10 +42,11 @@ MAX_MOVE_KM = 50.0  # a point farther than this from the nearest sea cell is tak
 
 def plan(graph: Graph, ship: Ship, forecast: Forecast, start, goal, departure, deadline, speeds_kn=SPEEDS_KN,
          tables: str | None = None, max_tries: int = 12, max_seconds: float = math.inf, via=(), legs: str = "distance",
-         land=None, currents: bool = True, prices=None, least_fuel: bool = True) -> dict:
+         land=None, currents: bool = True, prices=None, least_fuel: bool = True, keep_shortest: bool = True) -> dict:
     """least_fuel=False finds the shortest route only. prices: the price of an hour each leg met
     its time at in a like plan before (out["prices"] of the last plan of the same voyage, say),
-    to start from; one for legs="shared"."""
+    to start from; one for legs="shared". keep_shortest: if the least-fuel route found burns
+    more than the shortest route, give the shortest route as the least-fuel one."""
     departure, deadline = np.datetime64(departure, "s"), np.datetime64(deadline, "s")
     hours = float((deadline - departure) / np.timedelta64(1, "h"))
     points = [start, *via, goal]
@@ -52,6 +54,7 @@ def plan(graph: Graph, ship: Ship, forecast: Forecast, start, goal, departure, d
     out = {
         "start": list(start), "goal": list(goal), "via": [list(p) for p in via], "legs_time": legs, "currents": currents,
         "departure": str(departure), "deadline": str(deadline), "hours": hours,
+        "forecast_hours": float((forecast.time[-1] - departure) / np.timedelta64(1, "h")),  # past it the last step's weather holds
     }
     if not forecast.time[0] <= departure < forecast.time[-1]:
         out["error"] = f"출발 시각 {departure}이 예보 범위({forecast.time[0]} ~ {forecast.time[-1]}) 밖이에요."
@@ -156,6 +159,10 @@ def plan(graph: Graph, ship: Ship, forecast: Forecast, start, goal, departure, d
     if land is not None:
         f = choice.fill_slack(choice.snap_up(smoothed(choice.shortcut(land, f, waypoints(f)))), hours)
     out["least_fuel"] = describe(f, f.cost, choice.speeds_kn(f), float(f.clock[-1] - f.clock[0]), time.perf_counter() - t0)
+    out["least_fuel"]["is_shortest"] = bool(keep_shortest and f.cost > fuel)
+    if out["least_fuel"]["is_shortest"]:  # the way and speeds found burn more than the shortest route as it sails, also in time: keep that
+        out["least_fuel"] = {**out["shortest"], "seconds": out["least_fuel"]["seconds"], "is_shortest": True}
+        f = dataclasses.replace(r, clock=clock)
     ends = [0, *waypoints(f), len(f.lat) - 1]
     seg_km = np.r_[0.0, np.cumsum(haversine_km(f.lat[:-1], f.lon[:-1], f.lat[1:], f.lon[1:]))]
     out["least_fuel"]["legs"] = [{"km": round(float(seg_km[b] - seg_km[a]), 1), "hours": round(float(f.clock[b] - f.clock[a]), 1)}

@@ -305,6 +305,13 @@ function show(out) {
   const rows = parts.filter(p => !p.startsWith("<p")).join("");
   if (rows) html += `<table><tr><th></th><th>거리</th><th>시간</th><th>연료</th></tr>${rows}</table>`;
   if (out.saving_t !== undefined) html += `<p><b>절감 ${out.saving_t.toFixed(2)} t (${out.saving_pct.toFixed(2)}%)</b></p>`;
+  if (out.least_fuel && out.least_fuel.is_shortest) html += `<p style="color:var(--muted)">속력과 경로를 골라 찾은 것이 최단 경로보다 연료를 더 써서, 최단 경로를 그대로 최적으로 냈어요.</p>`;
+  const sailed = Math.max(...[out.shortest, out.least_fuel].filter(r => r).map(r => r.hours));
+  if (out.forecast_hours !== undefined && sailed > out.forecast_hours) {
+    const past = sailed - Math.max(out.forecast_hours, 0);
+    html += `<p class="stale">항해 ${sailed.toFixed(0)}시간 중 ${past.toFixed(0)}시간(${(100 * past / sailed).toFixed(0)}%)은 예보가 끝난 뒤라 ` +
+      `마지막 예보 시각의 날씨로 계산했어요. 그 구간의 연료와 절감은 실제와 많이 다를 수 있어요.</p>`;
+  }
   if (out.run) html += `<p style="color:var(--muted)">예보 회차: ${iso(out.run)} 발표</p>`;
   if (out.moved_km && out.moved_km.some(km => km > 1)) html += `<p style="color:var(--muted)">가장 가까운 바다 칸으로 옮김: ${out.moved_km.join(", ")} km</p>`;
   document.getElementById("summary").innerHTML = html;

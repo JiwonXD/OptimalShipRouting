@@ -123,7 +123,8 @@ def voyage(graph: Graph, ship: Ship, land, runs: Runs, came: Forecast, start, go
         t0 = time.perf_counter()
         target = deadline
         for _ in range(8):
-            p = plan(graph, ship, forecast, pos, goal, now, target, speeds_kn, tables, max_tries, max_seconds, ahead, land=land, prices=prices)
+            p = plan(graph, ship, forecast, pos, goal, now, target, speeds_kn, tables, max_tries, max_seconds, ahead, land=land, prices=prices,
+                     keep_shortest=False)  # the shortest route's points are not graph cells, where a plan is cut to replan
             if "least_fuel" in p:
                 break
             late = True
