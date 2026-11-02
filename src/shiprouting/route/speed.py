@@ -231,23 +231,27 @@ class SpeedChoice:
         clock, kg, _ = self.sail(out, k)
         return dataclasses.replace(out, clock=clock, cost=float(kg[k, np.arange(n)].sum()))
 
-    def retime(self, r: SearchResult, eta_hours: float, dt_hours: float = 0.02, max_current: float = 2.5) -> SearchResult:
+    def retime(self, r: SearchResult, eta_hours: float, dt_hours: float = 0.02, max_current: float = 2.5,
+               per_hour: float | None = None) -> SearchResult:
         """The speeds on r's way that burn the least fuel arriving within eta_hours of r's first clock.
 
         The way is kept; each segment takes one of the offered speeds. The segments are sailed
-        in order, each label (time, fuel) going on at every speed. After each segment, of the
-        labels whose times fall in the same bucket of dt_hours only the one burning the least is
-        kept; labels that can no longer arrive in time, even at the fastest speed with
-        max_current behind, are dropped. Exact but for the buckets; r itself is returned if it
-        arrives in time burning less. (Keeping every label in a
-        bucket that is earlier or burns less, as route.exact does, grows without bound on a
-        long way: slower is later and cheaper, so the labels in a bucket rarely dominate.)"""
+        in order, each label (time, fuel) going on at every speed; labels that can no longer
+        arrive in time, even at the fastest speed with max_current behind, are dropped. Of the
+        labels whose times fall in the same bucket of dt_hours only one is kept: the least
+        fuel + per_hour x hours (kg/h; by default self.per_hour, the price meet_eta left), so a
+        label a little later is not kept over an earlier one for less fuel than the time is
+        worth. Exact but for the buckets; r itself is returned if it arrives in time burning
+        less. (Keeping every label in a bucket that is earlier or burns less, as route.exact
+        does, grows without bound on a long way: slower is later and cheaper, so the labels in
+        a bucket rarely dominate.)"""
         n = len(r.lat) - 1
         seg_km = haversine_km(r.lat[:-1], r.lon[:-1], r.lat[1:], r.lon[1:])
         speed = np.array([c.speed for c in self.costs])
         calm = np.array([c.calm_kg_per_km for c in self.costs])
         left_h = np.r_[np.cumsum(seg_km[::-1])[::-1], 0.0] / ((speed.max() + max_current) * 3.6)
         end = r.clock[0] + eta_hours * (1 + 1e-9)
+        price = self.per_hour if per_hour is None else per_hour
         t, f = np.array([r.clock[0]]), np.array([0.0])
         layers = []  # per segment: parent label and speed index of each label kept
         for i in range(n):
@@ -264,9 +268,10 @@ class SpeedChoice:
             if not len(t2):
                 raise ValueError(f"no speeds on this way arrive within {eta_hours:g} h")
             bucket = np.floor(t2 / dt_hours)
-            order = np.lexsort((t2, f2, bucket))  # in each bucket, the least fuel first
-            t2, f2, k2, p2, bucket = t2[order], f2[order], k2[order], p2[order], bucket[order]
-            keep = np.r_[True, bucket[1:] != bucket[:-1]]
+            keep = np.zeros(len(t2), bool)
+            for value in (f2, f2 + price * t2):  # in each bucket, the least fuel and the least fuel + price × hours
+                order = np.lexsort((t2, value, bucket))
+                keep[order[np.r_[True, bucket[order][1:] != bucket[order][:-1]]]] = True
             t, f = t2[keep], f2[keep]
             layers.append((p2[keep], k2[keep]))
         best = int(np.argmin(f))

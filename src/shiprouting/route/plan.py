@@ -161,8 +161,9 @@ def plan(graph: Graph, ship: Ship, forecast: Forecast, start, goal, departure, d
     if land is not None:
         f = choice.shortcut(land, f, waypoints(f))
         f = choice.snap_up(smoothed(choice.relax(land, f, waypoints(f))))
+        met = [p for p in out["prices"] if p is not None]
         try:
-            f = choice.retime(f, hours)
+            f = choice.retime(f, hours, per_hour=float(np.mean(met)) if met else 0.0)
         except ValueError:  # no speeds on this way arrive in time as the buckets see it
             f = choice.fill_slack(f, hours)
     out["least_fuel"] = describe(f, f.cost, choice.speeds_kn(f), float(f.clock[-1] - f.clock[0]), time.perf_counter() - t0)
