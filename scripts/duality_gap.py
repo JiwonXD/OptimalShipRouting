@@ -5,7 +5,7 @@ time in the state and is exact but for buckets of 0.1 h. The gap is meet_eta's f
 exact fuel, minus one, on the grid (before shortcuts and smoothing).
 
     python scripts/duality_gap.py synthetic [--cases 14] [--dt-hours 0.1] [--max-labels N]
-    python scripts/duality_gap.py real LAND --runs DIR [--graph ...] [--tables DIR] [--cases 12] [--dt-hours 0.1] [--max-labels N]
+    python scripts/duality_gap.py real LAND --runs DIR [--graph ...] [--tables DIR] [--cases 12] [--only 1,6] [--dt-hours 0.1] [--max-labels N]
 
 With --no-exact only meet_eta and its re-timed speeds are found (the cases are the same as
 with the exact search, so the two outputs line up by case).
@@ -88,10 +88,13 @@ def gap(graph, a, b, choice, eta, dt_hours=0.1, max_labels=5_000_000, corridor_k
     except ValueError:  # nothing in time burns less than meet_eta's path (as the buckets see it): no gap
         ex = dataclasses.replace(r, cost=lag, expanded=-1)
     same = len(ex.lat) == len(r.lat) and bool(np.allclose(ex.lat, r.lat) and np.allclose(ex.lon, r.lon))
+    k = choice.speed_index(ex)  # the exact path's speeds sailed again from the start, as retime sails them
+    clock, kg, _ = choice.sail(ex, k)
+    resailed = {"exact_resailed_t": round(float(kg[k, np.arange(len(k))].sum()) / 1000, 3), "exact_resailed_h": round(float(clock[-1]), 2)}
     return {"eta_h": round(eta, 2), "price_t": round(lag / 1000, 3), "price_h": round(float(r.clock[-1]), 2),
             "exact_t": round(ex.cost / 1000, 3), "exact_h": round(float(ex.clock[-1]), 2), "same_path": same,
             "labels": ex.expanded, "exact_s": round(time.perf_counter() - t0, 1), "gap_pct": round(100 * (lag - ex.cost) / ex.cost, 3)} | retime | {
-            "retimed_gap_pct": round(100 * (retimed.cost - ex.cost) / ex.cost, 3)}
+            "retimed_gap_pct": round(100 * (retimed.cost - ex.cost) / ex.cost, 3)} | resailed
 
 
 def synthetic(args) -> list[dict]:
@@ -130,10 +133,12 @@ def real(args) -> list[dict]:
     for case, k in enumerate(sorted(picks)):
         name = list(STRETCHES)[case % len(STRETCHES)]
         (la0, lo0), (la1, lo1) = STRETCHES[name]
-        t, fc = runs.newest(runs.times[k])
         a, b = graph.nearest(la0, lo0), graph.nearest(la1, lo1)
         km = float(haversine_km(graph.lat[a], graph.lon[a], graph.lat[b], graph.lon[b]))
         eta = km / (rng.uniform(15, 17) * 1.852)
+        if args.only and case not in args.only:
+            continue
+        t, fc = runs.newest(runs.times[k])
         costs = []
         for kn in SPEEDS:
             w = AddedResistanceTable.between(args.tables, KCS_SHIP.seakeeping, kn * KNOT) if args.tables else None
@@ -164,6 +169,7 @@ def main() -> None:
     p.add_argument("--runs", required=True)
     p.add_argument("--tables")
     p.add_argument("--cases", type=int, default=12)
+    p.add_argument("--only", type=lambda v: [int(c) for c in v.split(",")], help="these case numbers only (comma-separated)")
     from shiprouting.route.plan import add_sea_args
 
     add_sea_args(p)
