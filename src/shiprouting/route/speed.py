@@ -238,7 +238,8 @@ class SpeedChoice:
         in order, each label (time, fuel) going on at every speed. After each segment, of the
         labels whose times fall in the same bucket of dt_hours only the one burning the least is
         kept; labels that can no longer arrive in time, even at the fastest speed with
-        max_current behind, are dropped. Exact but for the buckets. (Keeping every label in a
+        max_current behind, are dropped. Exact but for the buckets; r itself is returned if it
+        arrives in time burning less. (Keeping every label in a
         bucket that is earlier or burns less, as route.exact does, grows without bound on a
         long way: slower is later and cheaper, so the labels in a bucket rarely dominate.)"""
         n = len(r.lat) - 1
@@ -275,7 +276,10 @@ class SpeedChoice:
             k[i] = ks[best]
             best = parent[best]
         clock, kg, _ = self.sail(r, k)
-        return dataclasses.replace(r, clock=clock, cost=float(kg[k, np.arange(n)].sum()))
+        out = dataclasses.replace(r, clock=clock, cost=float(kg[k, np.arange(n)].sum()))
+        if r.clock[-1] <= end and (own := self.path(r)) < out.cost:  # r's own speeds, lost to the buckets, were better
+            return dataclasses.replace(r, cost=own)
+        return out
 
     def fill_slack(self, r: SearchResult, eta_hours: float, rounds: int = 20) -> SearchResult:
         """Spend the time a found path leaves before eta_hours: step segments down to the next

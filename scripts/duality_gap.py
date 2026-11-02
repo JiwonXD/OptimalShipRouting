@@ -69,11 +69,11 @@ def corridor(graph, r, km: float) -> np.ndarray | None:
     return near
 
 
-def gap(graph, a, b, choice, eta, dt_hours=0.1, max_labels=5_000_000, corridor_km=0.0, exact=True) -> dict:
+def gap(graph, a, b, choice, eta, dt_hours=0.1, max_labels=5_000_000, corridor_km=0.0, exact=True, retime_dt=0.02) -> dict:
     r, _ = meet_eta(graph, a, b, choice, eta)
     lag = choice.path(r)
     t0 = time.perf_counter()
-    retimed = choice.retime(r, eta)  # meet_eta's way, its speeds chosen again exactly
+    retimed = choice.retime(r, eta, retime_dt)  # meet_eta's way, its speeds chosen again
     retime = {"retimed_t": round(retimed.cost / 1000, 3), "retimed_h": round(float(retimed.clock[-1]), 2),
               "retime_s": round(time.perf_counter() - t0, 1)}
     if not exact:
@@ -112,7 +112,7 @@ def synthetic(args) -> list[dict]:
         fc = storm(rng.uniform(-2, 2), rng.uniform(150, 156), rng.uniform(-0.2, 0.2), rng.uniform(3, 7), rng.uniform(1, 2.5))
         eta = rng.uniform(19, 26)
         choice = SpeedChoice([FuelCost(KCS_SHIP, fc, T0, k * KNOT, frozen=False, currents=True) for k in SPEEDS])
-        out.append({"case": case} | gap(graph, a, b, choice, eta, args.dt_hours, args.max_labels, args.corridor_km, not args.no_exact))
+        out.append({"case": case} | gap(graph, a, b, choice, eta, args.dt_hours, args.max_labels, args.corridor_km, not args.no_exact, args.retime_dt))
         print(out[-1], flush=True)
     return out
 
@@ -139,7 +139,7 @@ def real(args) -> list[dict]:
             w = AddedResistanceTable.between(args.tables, KCS_SHIP.seakeeping, kn * KNOT) if args.tables else None
             costs.append(FuelCost(KCS_SHIP, fc, t, kn * KNOT, w, frozen=False, currents=True))
         out.append({"case": case, "stretch": name, "run": str(t)} | gap(graph, a, b, SpeedChoice(costs), eta, args.dt_hours, args.max_labels,
-                                                                                    args.corridor_km, not args.no_exact))
+                                                                                    args.corridor_km, not args.no_exact, args.retime_dt))
         print(out[-1], flush=True)
     return out
 
@@ -153,11 +153,13 @@ def main() -> None:
     p.add_argument("--max-labels", type=int, default=5_000_000, help="give a case up after this many labels")
     p.add_argument("--corridor-km", type=float, default=0.0, help="exact search only this close to meet_eta's path (0: anywhere)")
     p.add_argument("--no-exact", action="store_true", help="meet_eta and its re-timed speeds only, no exact search")
+    p.add_argument("--retime-dt", type=float, default=0.02, help="time bucket of the speed re-timing")
     p = sub.add_parser("real")
     p.add_argument("--dt-hours", type=float, default=0.1, help="time bucket of the exact search")
     p.add_argument("--max-labels", type=int, default=5_000_000, help="give a case up after this many labels")
     p.add_argument("--corridor-km", type=float, default=0.0, help="exact search only this close to meet_eta's path (0: anywhere)")
     p.add_argument("--no-exact", action="store_true", help="meet_eta and its re-timed speeds only, no exact search")
+    p.add_argument("--retime-dt", type=float, default=0.02, help="time bucket of the speed re-timing")
     p.add_argument("land", help="land polygons shapefile")
     p.add_argument("--runs", required=True)
     p.add_argument("--tables")
