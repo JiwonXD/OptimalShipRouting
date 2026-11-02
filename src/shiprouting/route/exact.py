@@ -11,8 +11,8 @@ weather is not lost; within a bucket, the times differ by less than dt_hours, wh
 only approximation. A label is dropped when it cannot reach the goal by the deadline even
 at the fastest speed along the great circle with the strongest current behind it.
 
-This is far slower than meet_eta and is meant for small areas (a few thousand cells). Links
-are not taken.
+This is far slower than meet_eta and is meant for small areas (a few thousand cells), or a
+corridor around a path (allowed). Links are not taken.
 """
 
 import heapq
@@ -28,15 +28,18 @@ from shiprouting.sea.quadtree import Graph
 
 def least_fuel_by(graph: Graph, s: int, g: int, choice: SpeedChoice, eta_hours: float, dt_hours: float = 0.1,
                   max_current: float = 2.5, max_labels: int = 5_000_000, max_seconds: float = math.inf,
-                  upper_kg: float = math.inf) -> SearchResult:
+                  upper_kg: float = math.inf, allowed: np.ndarray | None = None) -> SearchResult:
     """The least-fuel path from node s to node g arriving within eta_hours, each move at one of
     choice's speeds. max_current (m/s) bounds the current that can help, for pruning. upper_kg:
     the fuel of a path known to arrive in time (meet_eta's, say); labels burning that much are
     dropped from the start, and if none does better a ValueError says so. The result's cost is
-    the fuel, kg, and its clock the hours at each point."""
+    the fuel, kg, and its clock the hours at each point. allowed: a bool per node; the search
+    keeps to the nodes marked (a corridor around a known path, say), so it is exact within them."""
     t0 = time.perf_counter()
     fastest_kmh = (max(c.speed for c in choice.costs) + max_current) * 3.6
     to_goal_h = haversine_km(graph.lat, graph.lon, graph.lat[g], graph.lon[g]) / fastest_kmh
+    if allowed is not None:
+        to_goal_h = np.where(allowed, to_goal_h, math.inf)
     labels_t, labels_f, labels_node, labels_parent = [0.0], [0.0], [s], [-1]
     kept = {(s, 0): [0]}  # (node, bucket) -> label ids still standing
     heap = [(0.0, 0)]

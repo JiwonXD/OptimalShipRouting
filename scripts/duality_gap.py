@@ -7,7 +7,9 @@ exact fuel, minus one, on the grid (before shortcuts and smoothing).
     python scripts/duality_gap.py synthetic [--cases 14] [--dt-hours 0.1] [--max-labels N]
     python scripts/duality_gap.py real LAND --runs DIR [--graph ...] [--tables DIR] [--cases 12] [--dt-hours 0.1] [--max-labels N]
 
-A case whose exact search runs past max_labels is given up and counted as such.
+A case whose exact search runs past max_labels is given up and counted as such. With
+--corridor-km the exact search keeps within that distance of meet_eta's path, so the gap is
+the one within that corridor.
 
 synthetic: a calm-sea graph near the equator and a storm of random size, strength, place and
 drift; deadlines of 19-26 h for about 670 km.
@@ -53,12 +55,24 @@ def storm(lat0, lon0, dlon_per_h, peak_hs, radius) -> Forecast:
     return Forecast(lat, lon, times, f)
 
 
-def gap(graph, a, b, choice, eta, dt_hours=0.1, max_labels=5_000_000) -> dict:
+def corridor(graph, r, km: float) -> np.ndarray | None:
+    """The nodes within km of path r (None: no limit)."""
+    if not km:
+        return None
+    near = np.zeros(len(graph.lat), bool)
+    box = ((graph.lat > r.lat.min() - km / 100) & (graph.lat < r.lat.max() + km / 100)).nonzero()[0]
+    for la, lo in zip(r.lat, r.lon):
+        near[box] |= haversine_km(graph.lat[box], graph.lon[box], la, lo) <= km
+    return near
+
+
+def gap(graph, a, b, choice, eta, dt_hours=0.1, max_labels=5_000_000, corridor_km=0.0) -> dict:
     r, _ = meet_eta(graph, a, b, choice, eta)
     lag = choice.path(r)
     t0 = time.perf_counter()
     try:  # meet_eta's path bounds the fuel from the start
-        ex = least_fuel_by(graph, a, b, choice, eta, dt_hours, max_labels=max_labels, upper_kg=lag * (1 + 1e-6))
+        ex = least_fuel_by(graph, a, b, choice, eta, dt_hours, max_labels=max_labels, upper_kg=lag * (1 + 1e-6),
+                           allowed=corridor(graph, r, corridor_km))
     except TimeoutError as e:
         return {"eta_h": round(eta, 2), "price_t": round(lag / 1000, 3), "price_h": round(float(r.clock[-1]), 2),
                 "failed": str(e), "exact_s": round(time.perf_counter() - t0, 1)}
@@ -88,7 +102,7 @@ def synthetic(args) -> list[dict]:
         fc = storm(rng.uniform(-2, 2), rng.uniform(150, 156), rng.uniform(-0.2, 0.2), rng.uniform(3, 7), rng.uniform(1, 2.5))
         eta = rng.uniform(19, 26)
         choice = SpeedChoice([FuelCost(KCS_SHIP, fc, T0, k * KNOT, frozen=False, currents=True) for k in SPEEDS])
-        out.append({"case": case} | gap(graph, a, b, choice, eta, args.dt_hours, args.max_labels))
+        out.append({"case": case} | gap(graph, a, b, choice, eta, args.dt_hours, args.max_labels, args.corridor_km))
         print(out[-1], flush=True)
     return out
 
@@ -114,7 +128,7 @@ def real(args) -> list[dict]:
         for kn in SPEEDS:
             w = AddedResistanceTable.between(args.tables, KCS_SHIP.seakeeping, kn * KNOT) if args.tables else None
             costs.append(FuelCost(KCS_SHIP, fc, t, kn * KNOT, w, frozen=False, currents=True))
-        out.append({"case": case, "stretch": name, "run": str(t)} | gap(graph, a, b, SpeedChoice(costs), eta, args.dt_hours, args.max_labels))
+        out.append({"case": case, "stretch": name, "run": str(t)} | gap(graph, a, b, SpeedChoice(costs), eta, args.dt_hours, args.max_labels, args.corridor_km))
         print(out[-1], flush=True)
     return out
 
@@ -126,9 +140,11 @@ def main() -> None:
     p.add_argument("--cases", type=int, default=14)
     p.add_argument("--dt-hours", type=float, default=0.1, help="time bucket of the exact search")
     p.add_argument("--max-labels", type=int, default=5_000_000, help="give a case up after this many labels")
+    p.add_argument("--corridor-km", type=float, default=0.0, help="exact search only this close to meet_eta's path (0: anywhere)")
     p = sub.add_parser("real")
     p.add_argument("--dt-hours", type=float, default=0.1, help="time bucket of the exact search")
     p.add_argument("--max-labels", type=int, default=5_000_000, help="give a case up after this many labels")
+    p.add_argument("--corridor-km", type=float, default=0.0, help="exact search only this close to meet_eta's path (0: anywhere)")
     p.add_argument("land", help="land polygons shapefile")
     p.add_argument("--runs", required=True)
     p.add_argument("--tables")
