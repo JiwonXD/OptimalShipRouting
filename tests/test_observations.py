@@ -5,7 +5,7 @@ import numpy as np
 import pytest
 
 sys.path.insert(0, str(Path(__file__).parents[1] / "scripts"))
-import buoys
+import observations as buoys
 
 REALTIME = """#YY  MM DD hh mm WDIR WSPD GST  WVHT   DPD   APD MWD   PRES  ATMP  WTMP  DEWP  VIS PTDY  TIDE
 #yr  mo dy hr mn degT m/s  m/s     m   sec   sec degT   hPa  degC  degC  degC  nmi  hPa    ft
@@ -35,3 +35,13 @@ def test_station_table_locations():
 def test_scores():
     s = buoys.scores(np.array([2.0, 3.0, np.nan]), np.array([1.0, 2.0, 5.0]))
     assert s["n"] == 2 and s["bias"] == pytest.approx(1.0) and s["rmse"] == pytest.approx(1.0) and s["si"] == pytest.approx(0.0)
+
+
+def test_altimeter_blocks_are_whole_and_averaged_across_the_dateline():
+    t = np.datetime64("2026-09-01T00:00:00", "s") + np.arange(14).astype("timedelta64[s]")
+    lon = np.r_[np.linspace(179.5, 179.9, 6), np.linspace(-179.9, -179.5, 6), [0.0, 0.0]]
+    hs = np.r_[np.full(6, 2.0), np.full(5, 3.0), [np.nan], [1.0, 1.0]]
+    b = buoys.blocks(t, np.zeros(14), lon, hs, seconds=6)
+    assert len(b["time"]) == 1  # the second block lost a point, the third is short
+    assert b["time"][0] == np.datetime64("2026-09-01T00:00:03") and b["Hs"][0] == 2.0
+    assert b["lon"][0] == pytest.approx(179.7, abs=1e-9)
