@@ -35,6 +35,7 @@ MONTHS = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", 
 ANEMOMETER_M, Z0_M = 4.1, 0.0002
 BLOCK_S = 6
 MISSIONS = "al,c2,cfo,h2b,h2c,j3,s3a,s3b,s6a,swon"
+FILE_CODES = {"s6a": "s6a_lr", "swon": "swot"}  # how a mission is named in its files, where not as in the dataset
 LEADS = [(0, 21), (24, 45), (48, 69), (72, 93), (96, 141), (144, 237)]  # forecast hours, inclusive
 
 
@@ -170,7 +171,7 @@ def cmd_altimeters(args) -> None:
                 continue
             with tempfile.TemporaryDirectory() as tmp:
                 yyyymm = month.replace("-", "")
-                copernicusmarine.get(dataset_id=dataset, filter=f"*_{mission}_{yyyymm}[0-3][0-9]T*", output_directory=tmp, no_directories=True)
+                copernicusmarine.get(dataset_id=dataset, filter=f"*_{FILE_CODES.get(mission, mission)}_{yyyymm}[0-3][0-9]T*", output_directory=tmp, no_directories=True)
                 parts = []
                 for nc in sorted(glob.glob(os.path.join(tmp, "*.nc"))):
                     with xr.open_dataset(nc, engine="h5netcdf") as ds:
