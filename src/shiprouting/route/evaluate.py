@@ -105,13 +105,15 @@ def recost(result: dict, sea: Sea, speeds_kn) -> dict:
     return out
 
 
-def on_time(result: dict, sea: Sea, speeds_kn) -> dict:
+def on_time(result: dict, sea: Sea, speeds_kn, known: dict | None = None) -> dict:
     """Each track of a saved voyage ("shortest", "sailed") sailed again in sea's weather with its
     speeds chosen again (SpeedChoice.retime, of speeds_kn) for the least fuel that arrives by the
     voyage's deadline: the same track judged at the same arrival time, as a ship that keeps to its
     schedule would sail it. A track that cannot make the deadline is sailed at the fastest speed.
     The speeds are chosen knowing the weather ahead, so this is the fuel of the track, not of a
-    strategy that has to guess."""
+    strategy that has to guess. known: tracks already judged in this sea, by their points and
+    deadline (filled in here), so a track two results share, such as the shortest route of the
+    same departure, is judged once."""
     from shiprouting.route.speed import SpeedChoice
     from shiprouting.sea.latlon import SearchResult
 
@@ -120,6 +122,10 @@ def on_time(result: dict, sea: Sea, speeds_kn) -> dict:
     for name in ("shortest", "sailed"):
         t = result.get(name)
         if not t or "on_link" not in t:
+            continue
+        key = (tuple(t["lat"]), tuple(t["lon"]), tuple(t["on_link"]), result["hours"])
+        if known is not None and key in known:
+            out[name] = known[key]
             continue
         lat, lon, on_link = np.array(t["lat"]), np.array(t["lon"]), np.array(t["on_link"], bool)
         fastest = np.full(len(on_link), len(speeds_kn) - 1)
@@ -135,4 +141,6 @@ def on_time(result: dict, sea: Sea, speeds_kn) -> dict:
         seg = np.arange(len(k))
         out[name] = track(lat, lon, on_link, np.array(sorted(speeds_kn), float)[k], kg_all[k, seg], h_all[k, seg],
                           np.array(sorted(speeds_kn), float)[k], result["hours"])
+        if known is not None:
+            known[key] = out[name]
     return out

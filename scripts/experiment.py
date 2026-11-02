@@ -149,13 +149,16 @@ def cmd_table(args) -> None:
 def cmd_recost(args) -> None:
     runs = Runs(args.runs)
     worst = 0.0
-    for path in args.results:
+    voyage, sea, known = None, None, {}
+    for path in sorted(args.results):  # the results of one departure next to each other, sharing the weather
         with open(path, encoding="utf-8") as f:
             v = json.load(f)
         departure, deadline = np.datetime64(v["departure"], "s"), np.datetime64(v["deadline"], "s")
-        weather = truth_weather(args.era5, args.cmems, departure, deadline) if args.era5 else came_weather(runs, departure, deadline)
-        sea = Sea(KCS_SHIP, weather, departure, args.tables)
-        again = on_time(v, sea, SPEEDS_KN) if args.on_time else recost(v, sea, SPEEDS_KN)
+        if (departure, deadline) != voyage:
+            voyage, sea, weather, known = (departure, deadline), None, None, {}  # let the last weather go before loading the next
+            weather = truth_weather(args.era5, args.cmems, departure, deadline) if args.era5 else came_weather(runs, departure, deadline)
+            sea = Sea(KCS_SHIP, weather, departure, args.tables)
+        again = on_time(v, sea, SPEEDS_KN, known) if args.on_time else recost(v, sea, SPEEDS_KN)
         for name, t in again.items():
             d = 100 * (t["fuel_t"] - v[name]["fuel_t"]) / v[name]["fuel_t"]
             worst = max(worst, abs(d))

@@ -87,3 +87,18 @@ def test_on_time_keeps_the_track_and_chooses_speeds_that_arrive_by_the_deadline(
     assert out["lat"] == saved["sailed"]["lat"] and out["late_h"] == 0.0 and out["hours"] <= round(hours, 1)
     assert out["fuel_t"] > saved["sailed"]["fuel_t"]  # faster on average than 14 kn
     assert set(out["segment_kn"]) <= {12.0, 14.0, 16.0} and 16.0 in out["segment_kn"]
+
+
+def test_on_time_judges_a_track_two_results_share_once():
+    from shiprouting.route.evaluate import on_time, track
+
+    sea = Sea(KCS_SHIP, steady(Hs=2.0, T_m10=8.0, wave_from_x=1.0, wind_u=-8.0), T0)
+    lat, lon, on_link = np.zeros(4), np.linspace(150.0, 151.5, 4), np.zeros(3, bool)
+    kg, h, sailed, _ = sea.sail(lat, lon, on_link, np.full(3, 14.0), (12, 14, 16), 0.0)
+    hours = float(h.sum())
+    shared = track(lat, lon, on_link, np.full(3, 14.0), kg, h, sailed, hours)
+    known = {}
+    first = on_time({"hours": hours, "shortest": shared}, sea, (12, 14, 16), known)
+    second = on_time({"hours": hours, "shortest": dict(shared)}, sea, (12, 14, 16), known)
+    assert len(known) == 1 and second["shortest"] is first["shortest"]
+    assert on_time({"hours": hours, "shortest": shared}, sea, (12, 14, 16)) == first  # the same as judged afresh
