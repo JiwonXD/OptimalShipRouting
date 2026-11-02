@@ -64,13 +64,10 @@ def download(day: np.datetime64, target_dir, every_hours: int = 3, workers: int 
     return path
 
 
-def load(paths, dtype=np.float32) -> Forecast:
-    """Read files written by download into one Forecast (latitude ascending, longitude from -180),
-    its fields of dtype. Wave direction becomes the east and north components of the unit vector
-    pointing where the waves come from (wave_from_x, wave_from_y), as in ecmwf.load."""
-    lat = np.linspace(90.0, -90.0, NLAT)[::-1]
-    lon = (np.arange(NLON) * 0.25 + 180.0) % 360.0 - 180.0
-    order_lon = np.argsort(lon)
+def _read(paths, names, dtype):
+    """The times and the fields names of daily files in ARCO-ERA5's layout, joined, as (time,
+    latitude ascending, longitude from -180) arrays of dtype."""
+    order_lon = np.argsort((np.arange(NLON) * 0.25 + 180.0) % 360.0 - 180.0)
     paths = sorted(paths)
     times = []
     for path in paths:
@@ -79,16 +76,32 @@ def load(paths, dtype=np.float32) -> Forecast:
     time = np.concatenate(times)
     if np.any(np.diff(time) <= np.timedelta64(0, "s")):
         raise ValueError("the files' times overlap or are out of order")
-    fields = {short: np.empty((len(time), NLAT, NLON), dtype) for short in VARIABLES.values()}  # filled in place: one copy
+    fields = {name: np.empty((len(time), NLAT, NLON), dtype) for name in names}  # filled in place: one copy
     k = 0
     for path, t in zip(paths, times):
         with np.load(path) as f:
-            for short in VARIABLES.values():
-                fields[short][k : k + len(t)] = f[short][:, ::-1][:, :, order_lon]
+            for name in names:
+                fields[name][k : k + len(t)] = f[name][:, ::-1][:, :, order_lon]
         k += len(t)
+    return time, fields
+
+
+def load(paths, dtype=np.float32, currents=()) -> Forecast:
+    """Read files written by download into one Forecast (latitude ascending, longitude from -180),
+    its fields of dtype. Wave direction becomes the east and north components of the unit vector
+    pointing where the waves come from (wave_from_x, wave_from_y), as in ecmwf.load. currents:
+    files of current_u and current_v at the same times (cmems.download), added to the fields."""
+    time, fields = _read(paths, list(VARIABLES.values()), dtype)
     rad = np.radians(fields.pop("mwd"))
     fields["wave_from_x"], fields["wave_from_y"] = np.sin(rad).astype(dtype), np.cos(rad).astype(dtype)
-    return Forecast(lat=lat, lon=lon[order_lon], time=time, fields=fields)
+    del rad
+    if currents:
+        t, more = _read(currents, ["current_u", "current_v"], dtype)
+        if not np.array_equal(t, time):
+            raise ValueError("the current files are not at the same times as the ERA5 files")
+        fields |= more
+    lon = (np.arange(NLON) * 0.25 + 180.0) % 360.0 - 180.0
+    return Forecast(lat=np.linspace(-90.0, 90.0, NLAT), lon=np.sort(lon), time=time, fields=fields)
 
 
 def main() -> None:
