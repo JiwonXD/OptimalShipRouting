@@ -4,7 +4,7 @@ collect the results.
     python scripts/experiment.py deadlines MATRIX LAND --runs DIR [sea options]
     python scripts/experiment.py run MATRIX OUT LAND --season summer [--only busan_la,...] [sea options] [--tables DIR]
     python scripts/experiment.py table OUT result.csv
-    python scripts/experiment.py recost RESULT.json... --runs DIR [--tables DIR]
+    python scripts/experiment.py recost RESULT.json... --runs DIR [--tables DIR] [--era5 DIR --cmems DIR]
 
 deadlines: the routes with no hours yet get the shortest route's distance at 15 kn, rounded up to
 12 h (printed, to be written into the matrix before any run).
@@ -14,7 +14,8 @@ already there are kept, so a stopped run carries on where it was. The "daily" vo
 sails the first plan's shortest route, which is the baseline.
 table: one row per route and departure, the strategies side by side.
 recost: sail the tracks of saved voyages again in the weather that came (evaluate.recost)
-and compare with the fuel they were saved with.
+and compare with the fuel they were saved with. With --era5 the weather that came is ERA5 wind
+and waves with Copernicus Marine currents (--cmems) instead of the ECMWF forecasts' first hours.
 """
 
 import argparse
@@ -33,7 +34,7 @@ from shiprouting.fuel.ships import KCS_SHIP
 from shiprouting.route.evaluate import Sea, recost
 from shiprouting.route.plan import SPEEDS_KN, add_sea_args, plan, sea_graph
 from shiprouting.route.voyage import HOUR, Runs, came_files, voyage
-from shiprouting.weather import ecmwf
+from shiprouting.weather import ecmwf, era5
 
 DEADLINE_KN = 15.0
 
@@ -57,6 +58,13 @@ def came_weather(runs: Runs, departure, deadline):
     """The weather that came over a voyage: the first 21 h of each run from the day before it leaves to two days after its deadline."""
     folders = [d for t, d in zip(runs.times, runs.folders) if departure - 24 * HOUR <= t <= deadline + 48 * HOUR]
     return ecmwf.load(came_files(folders), np.float32)
+
+
+def truth_weather(era5_dir, cmems_dir, departure, deadline):
+    """ERA5 (and Copernicus Marine currents) from the day before a voyage leaves to two days after its deadline."""
+    days = [str(d).replace("-", "") for d in np.arange(np.datetime64(departure - 24 * HOUR, "D"), np.datetime64(deadline + 48 * HOUR, "D") + 1)]
+    currents = [os.path.join(cmems_dir, f"cmems_{d}.npz") for d in days] if cmems_dir else ()
+    return era5.load([os.path.join(era5_dir, f"era5_{d}.npz") for d in days], np.float32, currents)
 
 
 def cmd_deadlines(args, matrix) -> None:
@@ -137,13 +145,17 @@ def cmd_recost(args) -> None:
         with open(path, encoding="utf-8") as f:
             v = json.load(f)
         departure, deadline = np.datetime64(v["departure"], "s"), np.datetime64(v["deadline"], "s")
-        sea = Sea(KCS_SHIP, came_weather(runs, departure, deadline), departure, args.tables)
+        weather = truth_weather(args.era5, args.cmems, departure, deadline) if args.era5 else came_weather(runs, departure, deadline)
+        sea = Sea(KCS_SHIP, weather, departure, args.tables)
         again = recost(v, sea, SPEEDS_KN)
         for name, t in again.items():
             d = 100 * (t["fuel_t"] - v[name]["fuel_t"]) / v[name]["fuel_t"]
             worst = max(worst, abs(d))
             print(f"{os.path.basename(path)} {name}: saved {v[name]['fuel_t']} t {v[name]['hours']} h,"
                   f" again {t['fuel_t']} t {t['hours']} h ({d:+.3f}%)", flush=True)
+        if {"shortest", "sailed"} <= again.keys():
+            was, now = (100 * (w["shortest"]["fuel_t"] - w["sailed"]["fuel_t"]) / w["shortest"]["fuel_t"] for w in (v, again))
+            print(f"{os.path.basename(path)} saving over the shortest route: saved {was:+.2f}%, again {now:+.2f}%", flush=True)
     print(f"largest difference {worst:.3f}%")
 
 
@@ -174,6 +186,8 @@ def main() -> None:
     p.add_argument("results", nargs="+")
     p.add_argument("--runs", required=True)
     p.add_argument("--tables")
+    p.add_argument("--era5", help="folder of ERA5 days (weather.era5): sail in these instead of the forecasts")
+    p.add_argument("--cmems", help="folder of Copernicus Marine current days (weather.cmems), with --era5")
     args = parser.parse_args()
     if args.cmd in ("deadlines", "run"):
         with open(args.matrix, encoding="utf-8") as f:
