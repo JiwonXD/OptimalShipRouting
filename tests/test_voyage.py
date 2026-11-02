@@ -102,3 +102,27 @@ def test_on_time_judges_a_track_two_results_share_once():
     second = on_time({"hours": hours, "shortest": dict(shared)}, sea, (12, 14, 16), known)
     assert len(known) == 1 and second["shortest"] is first["shortest"]
     assert on_time({"hours": hours, "shortest": shared}, sea, (12, 14, 16)) == first  # the same as judged afresh
+
+
+def test_a_track_judged_on_time_burns_the_same_on_its_resistance_parts():
+    import sys
+    from pathlib import Path
+
+    from shiprouting.fuel import uncertainty
+    from shiprouting.route.evaluate import on_time, track
+    from shiprouting.route.fuel import KNOT
+    from shiprouting.route.plan import SPEEDS_KN
+
+    sys.path.insert(0, str(Path(__file__).parents[1] / "scripts"))
+    from experiment import track_parts
+
+    sea = Sea(KCS_SHIP, steady(Hs=2.5, T_m10=8.0, wave_from_x=1.0, wind_u=-9.0, current_u=0.4), T0)
+    lat, lon, on_link = np.zeros(7), np.linspace(150.0, 153.0, 7), np.array([False, False, True, False, False, False])
+    kg, h, sailed, _ = sea.sail(lat, lon, on_link, np.full(6, 14.0), (12, 14, 16), 0.0)
+    hours = float(h.sum()) * 0.97
+    judged = on_time({"hours": hours, "sailed": track(lat, lon, on_link, np.full(6, 14.0), kg, h, sailed, hours)}, sea, (12, 14, 16))["sailed"]
+    k, air, wave, h = track_parts(judged, sea)
+    assert wave[2] == 0.0 and air[2] > 0 and np.all(wave[[0, 1, 3]] > 0)  # the link at the calm-water rate, in still air
+    tables = uncertainty.rate_tables(KCS_SHIP, [kn * KNOT for kn in SPEEDS_KN])
+    fuel, over = uncertainty.track_fuel(k, air, wave, h, tables, 1.0, 1.0)
+    assert fuel / 1000 == pytest.approx(judged["fuel_t"], abs=0.006) and over == 0

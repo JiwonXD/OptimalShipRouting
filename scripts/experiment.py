@@ -7,6 +7,7 @@ collect the results.
     python scripts/experiment.py table OUT result.csv
     python scripts/experiment.py recost RESULT.json... --runs DIR [--tables DIR] [--era5 DIR --cmems DIR] [--on-time]
     python scripts/experiment.py backfill RESULT.json... --runs DIR --out DIR [--tables DIR]
+    python scripts/experiment.py uncertainty JUDGED.json... --era5 DIR [--cmems DIR] [--tables DIR] --out result.csv
 
 deadlines: the routes with no hours yet get the shortest route's distance at 15 kn, rounded up to
 12 h (printed, to be written into the matrix before any run).
@@ -27,6 +28,9 @@ recost can sail it: the one speed through the water that, sailed in the weather 
 the hours it was saved with (bisection), and no links (on_link all false: a canal is sailed in
 its weather, not at the calm rate). The fuel sailed again at that speed is printed against the
 saved fuel as a check. Written to --out under the same names; the originals are left alone.
+uncertainty: the savings of tracks judged on time (recost --on-time --out) under the fuel model's
+uncertain inputs (fuel.uncertainty.PARAMETERS): Monte Carlo spread, how often the sign holds, and
+Sobol indices, per route and strategy. The tracks keep their judged speeds; only the ship changes.
 """
 
 import argparse
@@ -181,6 +185,14 @@ def cmd_recost(args) -> None:
             weather = truth_weather(args.era5, args.cmems, departure, deadline) if args.era5 else came_weather(runs, departure, deadline)
             sea = Sea(KCS_SHIP, weather, departure, args.tables)
         again = on_time(v, sea, SPEEDS_KN, known) if args.on_time else recost(v, sea, SPEEDS_KN)
+        if args.out:
+            os.makedirs(args.out, exist_ok=True)
+            route, strategy = route_strategy(path, v)
+            judged = {"weather": "era5" + (" + copernicus marine currents" if args.cmems else "") if args.era5 else "ecmwf, steps 0-21 h",
+                      "speeds": "chosen again to arrive by the deadline" if args.on_time else "as planned", "commit": commit()}
+            with open(os.path.join(args.out, os.path.basename(path)), "w", encoding="utf-8") as f:
+                json.dump({k: v[k] for k in ("departure", "deadline", "hours")} | again
+                          | {"meta": {"route": route, "strategy": strategy, "judged": judged, "from": os.path.basename(path)}}, f, ensure_ascii=False)
         for name, t in again.items():
             d = 100 * (t["fuel_t"] - v[name]["fuel_t"]) / v[name]["fuel_t"]
             worst = max(worst, abs(d))
@@ -190,6 +202,104 @@ def cmd_recost(args) -> None:
             was, now = (100 * (w["shortest"]["fuel_t"] - w["sailed"]["fuel_t"]) / w["shortest"]["fuel_t"] for w in (v, again))
             print(f"{os.path.basename(path)} saving over the shortest route: saved {was:+.2f}%, again {now:+.2f}%", flush=True)
     print(f"largest difference {worst:.3f}%")
+
+
+def route_strategy(path, v) -> tuple[str, str]:
+    """A result's route and strategy: from its meta, or from its name (<route>_<departure>_<strategy>.json, v25_ before v25's)."""
+    if "route" in v.get("meta", {}):
+        return v["meta"]["route"], v["meta"]["strategy"]
+    route, _, strategy = os.path.splitext(os.path.basename(path))[0].rsplit("_", 2)
+    return route.removeprefix("v25_"), strategy
+
+
+def track_parts(t: dict, sea: Sea) -> tuple[np.ndarray, ...]:
+    """A judged track's speed indices (into SPEEDS_KN), and its moves' air and wave added resistance and hours (links, at the
+    calm-water rate: the air resistance of the ship's own speed in still air, no waves, the saved hours)."""
+    from shiprouting.fuel.wind import air_resistance
+    from shiprouting.route.fuel import KNOT
+
+    lat, lon, on_link = np.array(t["lat"]), np.array(t["lon"]), np.array(t["on_link"], bool)
+    kn, h_saved = np.array(t["segment_kn"]), np.array(t["segment_h"])
+    clock = np.r_[0.0, np.cumsum(h_saved)]
+    k = np.searchsorted(SPEEDS_KN, kn)
+    if not np.allclose(np.array(SPEEDS_KN)[np.minimum(k, len(SPEEDS_KN) - 1)], kn):
+        raise ValueError("a track's speeds are not all among SPEEDS_KN: judge it on time first (recost --on-time --out)")
+    air = np.array([air_resistance(sea.ship.windage, 0.0, 0.0, v * KNOT) for v in kn]) if sea.ship.windage else np.zeros(len(kn))
+    wave, h = np.zeros(len(kn)), h_saved.copy()
+    for j in np.unique(k):
+        i = np.nonzero((k == j) & ~on_link)[0]
+        air[i], wave[i], h[i] = sea.cost(SPEEDS_KN[j]).resistance_parts(lat[i], lon[i], lat[i + 1], lon[i + 1], clock[i])
+    if not np.allclose(h, h_saved, rtol=1e-4, atol=1e-6):
+        raise ValueError("the moves' hours differ from the saved ones: not the weather the track was judged in")
+    return k, air, wave, h
+
+
+def cmd_uncertainty(args) -> None:
+    from shiprouting.fuel import uncertainty as u
+    from shiprouting.route.fuel import KNOT
+
+    tracks, voyages, voyage, sea, known = [], [], None, None, {}
+    for path in sorted(args.results):
+        with open(path, encoding="utf-8") as f:
+            v = json.load(f)
+        departure, deadline = np.datetime64(v["departure"], "s"), np.datetime64(v["deadline"], "s")
+        if (departure, deadline) != voyage:
+            voyage, sea, weather, known = (departure, deadline), None, None, {}
+            weather = truth_weather(args.era5, args.cmems, departure, deadline)
+            sea = Sea(KCS_SHIP, weather, departure, args.tables)
+        index = {}
+        for name in ("shortest", "sailed"):
+            t = v[name]
+            key = (tuple(t["lat"]), tuple(t["lon"]), v["hours"])
+            if key not in known:
+                known[key] = len(tracks)
+                tracks.append(track_parts(t, sea))
+            index[name] = known[key]
+        voyages.append((os.path.basename(path), *route_strategy(path, v), index["shortest"], index["sailed"],
+                        v["shortest"]["fuel_t"], v["sailed"]["fuel_t"]))
+        print(f"{os.path.basename(path)}: {len(tracks)} tracks", flush=True)
+    sea = weather = None
+    A, B, AB = u.saltelli(args.n, np.random.default_rng(args.seed))
+    samples = np.vstack([u.NOMINAL[None], A, B, AB.reshape(-1, len(u.PARAMETERS))])
+    fuel, over = np.empty((len(samples), len(tracks))), np.zeros(len(samples), int)
+    t0 = time.perf_counter()
+    for s, p in enumerate(samples):
+        tables = u.rate_tables(u.ship_with(KCS_SHIP, p), [kn * KNOT for kn in SPEEDS_KN])
+        for j, (k, air, wave, h) in enumerate(tracks):
+            fuel[s, j], n_over = u.track_fuel(k, air, wave, h, tables, p[4], p[5])
+            over[s] += n_over
+        if s % 500 == 0:
+            print(f"sample {s}/{len(samples)}, {time.perf_counter() - t0:.0f} s", flush=True)
+    saving = np.array([100 * (fuel[:, a] - fuel[:, b]) / fuel[:, a] for _, _, _, a, b, _, _ in voyages]).T  # (samples, voyages)
+    nominal_check = max(max(abs(fuel[0, a] / 1000 / fs - 1), abs(fuel[0, b] / 1000 / fp - 1)) for _, _, _, a, b, fs, fp in voyages)
+    print(f"nominal sample against the judged fuel: largest difference {100 * nominal_check:.3f}%")
+    n, d = args.n, len(u.PARAMETERS)
+    mc = slice(1, 1 + 2 * n)  # A and B: independent samples
+    groups = {"all": np.ones(len(voyages), bool)}
+    for key in dict.fromkeys((r, st) for _, r, st, *_ in voyages):
+        groups[f"{key[0]} {key[1]}"] = np.array([(r, st) == key for _, r, st, *_ in voyages])
+    rows = []
+    for g, on in groups.items():
+        y = saving[:, on].mean(axis=1)
+        S1, ST = u.sobol(y[1 : 1 + n], y[1 + n : 1 + 2 * n], y[1 + 2 * n :].reshape(d, n))
+        sign = np.sign(y[0])
+        rows.append({"group": g, "voyages": int(on.sum()), "nominal_pct": round(float(y[0]), 3),
+                     "p5_pct": round(float(np.percentile(y[mc], 5)), 3), "p50_pct": round(float(np.percentile(y[mc], 50)), 3),
+                     "p95_pct": round(float(np.percentile(y[mc], 95)), 3), "sign_kept": round(float(np.mean(np.sign(y[mc]) == sign)), 4),
+                     "voyages_sign_kept_90": int((np.mean(np.sign(saving[mc][:, on]) == np.sign(saving[0, on]), axis=0) >= 0.9).sum())}
+                    | {f"S1_{p.name}": round(float(a), 3) for p, a in zip(u.PARAMETERS, S1)}
+                    | {f"ST_{p.name}": round(float(a), 3) for p, a in zip(u.PARAMETERS, ST)})  # fmt: skip
+        print({k: rows[-1][k] for k in ("group", "voyages", "nominal_pct", "p5_pct", "p50_pct", "p95_pct", "sign_kept", "voyages_sign_kept_90")},
+              flush=True)
+    print(f"moves over MCR, taken at MCR's fuel rate: {int(over[mc].sum())} in {2 * n} samples"
+          f" ({over[mc].sum() / (2 * n * sum(len(t[0]) for t in tracks)):.2e} of moves)")
+    with open(args.out, "w", newline="", encoding="utf-8") as f:
+        w = csv.DictWriter(f, list(rows[0]))
+        w.writeheader()
+        w.writerows(rows)
+    np.savez_compressed(os.path.splitext(args.out)[0] + ".npz", samples=samples, fuel=fuel, saving=saving, over=over,
+                        parameters=[p.name for p in u.PARAMETERS], voyages=[x[0] for x in voyages])
+    print(f"{len(rows)} rows -> {args.out}")
 
 
 def cmd_backfill(args) -> None:
@@ -255,6 +365,15 @@ def main() -> None:
     p.add_argument("--era5", help="folder of ERA5 days (weather.era5): sail in these instead of the forecasts")
     p.add_argument("--cmems", help="folder of Copernicus Marine current days (weather.cmems), with --era5")
     p.add_argument("--on-time", action="store_true", help="choose each track's speeds again to arrive by the deadline")
+    p.add_argument("--out", help="folder to write the judged tracks to, under the results' names")
+    p = sub.add_parser("uncertainty")
+    p.add_argument("results", nargs="+", help="tracks judged on time in ERA5 (recost --era5 --on-time --out)")
+    p.add_argument("--era5", required=True)
+    p.add_argument("--cmems")
+    p.add_argument("--tables")
+    p.add_argument("--n", type=int, default=512, help="Saltelli base samples: n x (parameters + 2) ship models")
+    p.add_argument("--seed", type=int, default=20261103)
+    p.add_argument("--out", required=True, help=".csv of the results per route and strategy (and an .npz of every sample)")
     p = sub.add_parser("backfill")
     p.add_argument("results", nargs="+")
     p.add_argument("--runs", required=True)
@@ -266,7 +385,7 @@ def main() -> None:
             matrix = json.load(f)
         (cmd_deadlines if args.cmd == "deadlines" else cmd_run)(args, matrix)
     else:
-        {"table": cmd_table, "recost": cmd_recost, "backfill": cmd_backfill}[args.cmd](args)
+        {"table": cmd_table, "recost": cmd_recost, "backfill": cmd_backfill, "uncertainty": cmd_uncertainty}[args.cmd](args)
 
 
 if __name__ == "__main__":

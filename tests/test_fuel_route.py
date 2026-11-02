@@ -60,6 +60,25 @@ def test_moves_cost_what_the_ship_model_gives_on_a_wave_table_point():
     assert cost(fc).kg(0.0, 150.0, 0.0, 150.5) == pytest.approx(KCS_SHIP.fuel_rate(16 * KNOT, sea) * hours, rel=1e-4)
 
 
+def test_resistance_parts_are_the_air_and_wave_resistance_of_the_ship_model():
+    from shiprouting.fuel.powering import brake_power
+    from shiprouting.fuel.wind import air_resistance
+
+    fc = forecast(wind_u=-8.0, wind_v=-6.0, Hs=3.0, wave_from_x=1.0, T_m10=7.0 / T01_PER_TM10, current_u=0.5)
+    sea = sea_state(weather_at(fc, 0.0, 150.25, T0), math.pi / 2)
+    c = FuelCost(KCS_SHIP, fc, T0, 16 * KNOT, WAVES, currents=True)
+    air, wave, h = c.resistance_parts([0.0, 0.0], [150.0, 150.5], [0.0, 0.0], [150.5, 150.0])
+    kg, h_kg = c.kg_hours([0.0, 0.0], [150.0, 150.5], [0.0, 0.0], [150.5, 150.0])
+    assert h == pytest.approx(h_kg) and h[0] < h[1]  # the current along the track, east
+    sog = 16 * KNOT + 0.5
+    assert air[0] == pytest.approx(air_resistance(KCS_SHIP.windage, sea.wind_speed, sea.wind_angle, sog), rel=1e-6)
+    assert wave[0] == pytest.approx(sum(WAVES(w.Hs, w.T01, w.angle) for w in sea.waves), rel=1e-6)
+    R = KCS_SHIP.resistance(16 * KNOT) + air + wave  # the fuel rate at this resistance is what kg_hours burns
+    ship = KCS_SHIP
+    rate = np.array([ship.engine.fuel_rate(brake_power(r, 16 * KNOT, ship.factors, ship.propeller, ship.propeller_D)) for r in R])
+    assert kg == pytest.approx(rate * h, rel=1e-4)
+
+
 def test_moves_beyond_the_engine_cost_infinity():
     c = cost(forecast(Hs=20.0, wave_from_x=1.0, T_m10=9.0))
     assert c.kg(0.0, 150.0, 0.0, 150.5) == math.inf
