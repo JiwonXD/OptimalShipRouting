@@ -120,3 +120,24 @@ def test_starting_from_a_price_that_met_the_eta_before_takes_fewer_tries():
     assert len(warm_tries) < len(cold_tries)
     assert warm.clock[-1] <= eta * (1 + 1e-9)
     assert warm.cost == pytest.approx(cold.cost, rel=0.005)
+
+
+def test_retime_finds_the_least_fuel_speeds_on_a_fixed_way():
+    import itertools
+
+    from shiprouting.sea.latlon import SearchResult
+
+    fc = forecast(wind_u=-10.0, Hs=2.0, wave_from_x=1.0, T_m10=8.0)
+    fc.fields["Hs"][1] = 5.0
+    sc = choice(fc, (12, 16, 20))
+    lat, lon = np.zeros(5), np.linspace(150.0, 152.0, 5)
+    r = SearchResult(lat, lon, np.zeros(4, bool), [], 0.0, 0, 0.0, clock=np.zeros(5))
+    eta = 7.5
+    best = math.inf
+    for k in itertools.product(range(3), repeat=4):  # every choice of speeds
+        clock, kg, _ = sc.sail(r, np.array(k))
+        if clock[-1] <= eta:
+            best = min(best, kg[np.array(k), np.arange(4)].sum())
+    out = sc.retime(r, eta, dt_hours=0.01)
+    assert out.clock[-1] <= eta
+    assert out.cost == pytest.approx(best, rel=1e-9)

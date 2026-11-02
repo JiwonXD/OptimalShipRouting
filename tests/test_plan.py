@@ -165,8 +165,8 @@ def test_the_least_fuel_route_keeps_going_round_a_storm():
 def test_the_shortest_route_is_kept_when_the_search_finds_nothing_better(monkeypatch):
     import dataclasses
 
-    fill = plan_module.SpeedChoice.fill_slack
-    monkeypatch.setattr(plan_module.SpeedChoice, "fill_slack", lambda self, r, eta: dataclasses.replace(fill(self, r, eta), cost=1e9))
+    retime = plan_module.SpeedChoice.retime
+    monkeypatch.setattr(plan_module.SpeedChoice, "retime", lambda self, r, eta: dataclasses.replace(retime(self, r, eta), cost=1e9))
     via = [(4.5, 152.5)]
     out = plan(70.0, via=via, land=LAND)
     short, best = out["shortest"], out["least_fuel"]

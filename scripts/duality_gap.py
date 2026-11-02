@@ -7,6 +7,9 @@ exact fuel, minus one, on the grid (before shortcuts and smoothing).
     python scripts/duality_gap.py synthetic [--cases 14] [--dt-hours 0.1] [--max-labels N]
     python scripts/duality_gap.py real LAND --runs DIR [--graph ...] [--tables DIR] [--cases 12] [--dt-hours 0.1] [--max-labels N]
 
+With --no-exact only meet_eta and its re-timed speeds are found (the cases are the same as
+with the exact search, so the two outputs line up by case).
+
 A case whose exact search runs past max_labels is given up and counted as such. With
 --corridor-km the exact search keeps within that distance of meet_eta's path, so the gap is
 the one within that corridor.
@@ -66,22 +69,29 @@ def corridor(graph, r, km: float) -> np.ndarray | None:
     return near
 
 
-def gap(graph, a, b, choice, eta, dt_hours=0.1, max_labels=5_000_000, corridor_km=0.0) -> dict:
+def gap(graph, a, b, choice, eta, dt_hours=0.1, max_labels=5_000_000, corridor_km=0.0, exact=True) -> dict:
     r, _ = meet_eta(graph, a, b, choice, eta)
     lag = choice.path(r)
+    t0 = time.perf_counter()
+    retimed = choice.retime(r, eta)  # meet_eta's way, its speeds chosen again exactly
+    retime = {"retimed_t": round(retimed.cost / 1000, 3), "retimed_h": round(float(retimed.clock[-1]), 2),
+              "retime_s": round(time.perf_counter() - t0, 1)}
+    if not exact:
+        return {"eta_h": round(eta, 2), "price_t": round(lag / 1000, 3), "price_h": round(float(r.clock[-1]), 2)} | retime
     t0 = time.perf_counter()
     try:  # meet_eta's path bounds the fuel from the start
         ex = least_fuel_by(graph, a, b, choice, eta, dt_hours, max_labels=max_labels, upper_kg=lag * (1 + 1e-6),
                            allowed=corridor(graph, r, corridor_km))
     except TimeoutError as e:
         return {"eta_h": round(eta, 2), "price_t": round(lag / 1000, 3), "price_h": round(float(r.clock[-1]), 2),
-                "failed": str(e), "exact_s": round(time.perf_counter() - t0, 1)}
+                "failed": str(e), "exact_s": round(time.perf_counter() - t0, 1)} | retime
     except ValueError:  # nothing in time burns less than meet_eta's path (as the buckets see it): no gap
         ex = dataclasses.replace(r, cost=lag, expanded=-1)
     same = len(ex.lat) == len(r.lat) and bool(np.allclose(ex.lat, r.lat) and np.allclose(ex.lon, r.lon))
     return {"eta_h": round(eta, 2), "price_t": round(lag / 1000, 3), "price_h": round(float(r.clock[-1]), 2),
             "exact_t": round(ex.cost / 1000, 3), "exact_h": round(float(ex.clock[-1]), 2), "same_path": same,
-            "labels": ex.expanded, "exact_s": round(time.perf_counter() - t0, 1), "gap_pct": round(100 * (lag - ex.cost) / ex.cost, 3)}
+            "labels": ex.expanded, "exact_s": round(time.perf_counter() - t0, 1), "gap_pct": round(100 * (lag - ex.cost) / ex.cost, 3)} | retime | {
+            "retimed_gap_pct": round(100 * (retimed.cost - ex.cost) / ex.cost, 3)}
 
 
 def synthetic(args) -> list[dict]:
@@ -102,7 +112,7 @@ def synthetic(args) -> list[dict]:
         fc = storm(rng.uniform(-2, 2), rng.uniform(150, 156), rng.uniform(-0.2, 0.2), rng.uniform(3, 7), rng.uniform(1, 2.5))
         eta = rng.uniform(19, 26)
         choice = SpeedChoice([FuelCost(KCS_SHIP, fc, T0, k * KNOT, frozen=False, currents=True) for k in SPEEDS])
-        out.append({"case": case} | gap(graph, a, b, choice, eta, args.dt_hours, args.max_labels, args.corridor_km))
+        out.append({"case": case} | gap(graph, a, b, choice, eta, args.dt_hours, args.max_labels, args.corridor_km, not args.no_exact))
         print(out[-1], flush=True)
     return out
 
@@ -128,7 +138,8 @@ def real(args) -> list[dict]:
         for kn in SPEEDS:
             w = AddedResistanceTable.between(args.tables, KCS_SHIP.seakeeping, kn * KNOT) if args.tables else None
             costs.append(FuelCost(KCS_SHIP, fc, t, kn * KNOT, w, frozen=False, currents=True))
-        out.append({"case": case, "stretch": name, "run": str(t)} | gap(graph, a, b, SpeedChoice(costs), eta, args.dt_hours, args.max_labels, args.corridor_km))
+        out.append({"case": case, "stretch": name, "run": str(t)} | gap(graph, a, b, SpeedChoice(costs), eta, args.dt_hours, args.max_labels,
+                                                                                    args.corridor_km, not args.no_exact))
         print(out[-1], flush=True)
     return out
 
@@ -141,10 +152,12 @@ def main() -> None:
     p.add_argument("--dt-hours", type=float, default=0.1, help="time bucket of the exact search")
     p.add_argument("--max-labels", type=int, default=5_000_000, help="give a case up after this many labels")
     p.add_argument("--corridor-km", type=float, default=0.0, help="exact search only this close to meet_eta's path (0: anywhere)")
+    p.add_argument("--no-exact", action="store_true", help="meet_eta and its re-timed speeds only, no exact search")
     p = sub.add_parser("real")
     p.add_argument("--dt-hours", type=float, default=0.1, help="time bucket of the exact search")
     p.add_argument("--max-labels", type=int, default=5_000_000, help="give a case up after this many labels")
     p.add_argument("--corridor-km", type=float, default=0.0, help="exact search only this close to meet_eta's path (0: anywhere)")
+    p.add_argument("--no-exact", action="store_true", help="meet_eta and its re-timed speeds only, no exact search")
     p.add_argument("land", help="land polygons shapefile")
     p.add_argument("--runs", required=True)
     p.add_argument("--tables")
@@ -157,7 +170,9 @@ def main() -> None:
     done = [r for r in rows if "gap_pct" in r]
     gaps = np.array([r["gap_pct"] for r in done])
     print(f"{len(rows)} cases, {len(rows) - len(done)} given up: median gap {np.median(gaps):.3f}%, largest {gaps.max():.3f}%,"
-          f" over 0.5%: {(gaps > 0.5).sum()}, same path in {sum(r['same_path'] for r in done)}" if len(done) else f"{len(rows)} cases, all given up")
+          f" over 0.5%: {(gaps > 0.5).sum()}, same path in {sum(r['same_path'] for r in done)};"
+          f" after retime: median {np.median([r['retimed_gap_pct'] for r in done]):.3f}%, largest {max(r['retimed_gap_pct'] for r in done):.3f}%"
+          if len(done) else f"{len(rows)} cases, " + ("no exact search" if args.no_exact else "all given up"))
 
 
 if __name__ == "__main__":

@@ -231,6 +231,52 @@ class SpeedChoice:
         clock, kg, _ = self.sail(out, k)
         return dataclasses.replace(out, clock=clock, cost=float(kg[k, np.arange(n)].sum()))
 
+    def retime(self, r: SearchResult, eta_hours: float, dt_hours: float = 0.02, max_current: float = 2.5) -> SearchResult:
+        """The speeds on r's way that burn the least fuel arriving within eta_hours of r's first clock.
+
+        The way is kept; each segment takes one of the offered speeds. The segments are sailed
+        in order, each label (time, fuel) going on at every speed. After each segment, of the
+        labels whose times fall in the same bucket of dt_hours only the one burning the least is
+        kept; labels that can no longer arrive in time, even at the fastest speed with
+        max_current behind, are dropped. Exact but for the buckets. (Keeping every label in a
+        bucket that is earlier or burns less, as route.exact does, grows without bound on a
+        long way: slower is later and cheaper, so the labels in a bucket rarely dominate.)"""
+        n = len(r.lat) - 1
+        seg_km = haversine_km(r.lat[:-1], r.lon[:-1], r.lat[1:], r.lon[1:])
+        speed = np.array([c.speed for c in self.costs])
+        calm = np.array([c.calm_kg_per_km for c in self.costs])
+        left_h = np.r_[np.cumsum(seg_km[::-1])[::-1], 0.0] / ((speed.max() + max_current) * 3.6)
+        end = r.clock[0] + eta_hours * (1 + 1e-9)
+        t, f = np.array([r.clock[0]]), np.array([0.0])
+        layers = []  # per segment: parent label and speed index of each label kept
+        for i in range(n):
+            if r.on_link[i]:
+                kg = np.broadcast_to((seg_km[i] * calm)[:, None], (len(speed), len(t)))
+                h = np.broadcast_to((seg_km[i] / (speed * 3.6))[:, None], (len(speed), len(t)))
+            else:
+                kg, h = self.kg_hours(r.lat[i], r.lon[i], r.lat[i + 1], r.lon[i + 1], t)
+            t2, f2 = (t[None] + h).ravel(), (f[None] + kg).ravel()
+            k2 = np.repeat(np.arange(len(speed)), len(t))
+            p2 = np.tile(np.arange(len(t)), len(speed))
+            ok = np.isfinite(f2) & (t2 + left_h[i + 1] <= end)
+            t2, f2, k2, p2 = t2[ok], f2[ok], k2[ok], p2[ok]
+            if not len(t2):
+                raise ValueError(f"no speeds on this way arrive within {eta_hours:g} h")
+            bucket = np.floor(t2 / dt_hours)
+            order = np.lexsort((t2, f2, bucket))  # in each bucket, the least fuel first
+            t2, f2, k2, p2, bucket = t2[order], f2[order], k2[order], p2[order], bucket[order]
+            keep = np.r_[True, bucket[1:] != bucket[:-1]]
+            t, f = t2[keep], f2[keep]
+            layers.append((p2[keep], k2[keep]))
+        best = int(np.argmin(f))
+        k = np.empty(n, int)
+        for i in range(n - 1, -1, -1):
+            parent, ks = layers[i]
+            k[i] = ks[best]
+            best = parent[best]
+        clock, kg, _ = self.sail(r, k)
+        return dataclasses.replace(r, clock=clock, cost=float(kg[k, np.arange(n)].sum()))
+
     def fill_slack(self, r: SearchResult, eta_hours: float, rounds: int = 20) -> SearchResult:
         """Spend the time a found path leaves before eta_hours: step segments down to the next
         slower speed, those saving the most fuel per extra hour first. Each round re-sails the

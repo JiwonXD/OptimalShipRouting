@@ -16,8 +16,8 @@ and the least-fuel route takes the shortcuts that burn no more fuel (SpeedChoice
 and moves its points sideways off the grid's eight directions where that is cheaper
 (SpeedChoice.relax).
 Both routes then have their sharp turns smoothed out (quadtree.smooth_turns), waypoints
-kept, and the least-fuel route is re-timed to the speeds on offer and spends the time
-that saves.
+kept, and the least-fuel route's speeds are chosen again on its final way, the least fuel
+that arrives by the deadline (SpeedChoice.retime).
 
 With currents, the surface current changes each move's speed over the ground (FuelCost),
 so the shortest route's one speed through the water is adjusted until it arrives at the
@@ -160,7 +160,11 @@ def plan(graph: Graph, ship: Ship, forecast: Forecast, start, goal, departure, d
     out["prices"] = [min((t["per_hour"] for t in tries if t["in_time"]), default=None) for tries in out["tries"]]  # the lowest that arrived in time
     if land is not None:
         f = choice.shortcut(land, f, waypoints(f))
-        f = choice.fill_slack(choice.snap_up(smoothed(choice.relax(land, f, waypoints(f)))), hours)
+        f = choice.snap_up(smoothed(choice.relax(land, f, waypoints(f))))
+        try:
+            f = choice.retime(f, hours)
+        except ValueError:  # no speeds on this way arrive in time as the buckets see it
+            f = choice.fill_slack(f, hours)
     out["least_fuel"] = describe(f, f.cost, choice.speeds_kn(f), float(f.clock[-1] - f.clock[0]), time.perf_counter() - t0)
     out["least_fuel"]["is_shortest"] = bool(keep_shortest and f.cost > fuel)
     if out["least_fuel"]["is_shortest"]:  # the way and speeds found burn more than the shortest route as it sails, also in time: keep that
