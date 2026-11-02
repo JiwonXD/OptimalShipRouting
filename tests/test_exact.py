@@ -49,3 +49,14 @@ def test_in_a_calm_sea_the_exact_fuel_is_the_slowest_speed_that_arrives():
     c = choice(fc)
     ex = least_fuel_by(GRAPH, a, b, c, 100.0)
     assert set(np.round(c.speeds_kn(ex), 6)) == {12.0}
+
+
+def test_a_known_path_bounds_the_search():
+    fc = forecast(wind_u=-10.0, Hs=2.0, wave_from_x=1.0, T_m10=8.0)
+    a, b = GRAPH.nearest(0.5, 150.5), GRAPH.nearest(0.5, 154.5)
+    c = choice(fc)
+    best = least_fuel_by(GRAPH, a, b, c, 20.0)
+    bounded = least_fuel_by(GRAPH, a, b, c, 20.0, upper_kg=best.cost * 1.01)
+    assert bounded.cost == pytest.approx(best.cost) and bounded.expanded <= best.expanded
+    with pytest.raises(ValueError):
+        least_fuel_by(GRAPH, a, b, c, 20.0, upper_kg=best.cost * 0.99)

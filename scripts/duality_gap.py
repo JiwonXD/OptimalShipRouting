@@ -4,8 +4,10 @@ Both search the same graph with the same speeds and deadline; route.exact.least_
 time in the state and is exact but for buckets of 0.1 h. The gap is meet_eta's fuel over the
 exact fuel, minus one, on the grid (before shortcuts and smoothing).
 
-    python scripts/duality_gap.py synthetic [--cases 14]
-    python scripts/duality_gap.py real LAND --runs DIR [--graph ...] [--tables DIR] [--cases 12]
+    python scripts/duality_gap.py synthetic [--cases 14] [--dt-hours 0.1] [--max-labels N]
+    python scripts/duality_gap.py real LAND --runs DIR [--graph ...] [--tables DIR] [--cases 12] [--dt-hours 0.1] [--max-labels N]
+
+A case whose exact search runs past max_labels is given up and counted as such.
 
 synthetic: a calm-sea graph near the equator and a storm of random size, strength, place and
 drift; deadlines of 19-26 h for about 670 km.
@@ -14,6 +16,7 @@ real sea graph, leaving at 00z on the forecast runs found, deadlines at 15-17 kn
 """
 
 import argparse
+import dataclasses
 import math
 import time
 
@@ -50,18 +53,24 @@ def storm(lat0, lon0, dlon_per_h, peak_hs, radius) -> Forecast:
     return Forecast(lat, lon, times, f)
 
 
-def gap(graph, a, b, choice, eta) -> dict:
+def gap(graph, a, b, choice, eta, dt_hours=0.1, max_labels=5_000_000) -> dict:
     r, _ = meet_eta(graph, a, b, choice, eta)
     lag = choice.path(r)
     t0 = time.perf_counter()
-    ex = least_fuel_by(graph, a, b, choice, eta)
+    try:  # meet_eta's path bounds the fuel from the start
+        ex = least_fuel_by(graph, a, b, choice, eta, dt_hours, max_labels=max_labels, upper_kg=lag * (1 + 1e-6))
+    except TimeoutError as e:
+        return {"eta_h": round(eta, 2), "price_t": round(lag / 1000, 3), "price_h": round(float(r.clock[-1]), 2),
+                "failed": str(e), "exact_s": round(time.perf_counter() - t0, 1)}
+    except ValueError:  # nothing in time burns less than meet_eta's path (as the buckets see it): no gap
+        ex = dataclasses.replace(r, cost=lag, expanded=-1)
     same = len(ex.lat) == len(r.lat) and bool(np.allclose(ex.lat, r.lat) and np.allclose(ex.lon, r.lon))
     return {"eta_h": round(eta, 2), "price_t": round(lag / 1000, 3), "price_h": round(float(r.clock[-1]), 2),
             "exact_t": round(ex.cost / 1000, 3), "exact_h": round(float(ex.clock[-1]), 2), "same_path": same,
             "labels": ex.expanded, "exact_s": round(time.perf_counter() - t0, 1), "gap_pct": round(100 * (lag - ex.cost) / ex.cost, 3)}
 
 
-def synthetic(cases: int) -> list[dict]:
+def synthetic(args) -> list[dict]:
     import shapely
 
     from shiprouting.fuel import waves
@@ -75,11 +84,11 @@ def synthetic(cases: int) -> list[dict]:
     a, b = graph.nearest(0.25, 150.25), graph.nearest(0.25, 156.25)
     rng = np.random.default_rng(1)
     out = []
-    for case in range(cases):
+    for case in range(args.cases):
         fc = storm(rng.uniform(-2, 2), rng.uniform(150, 156), rng.uniform(-0.2, 0.2), rng.uniform(3, 7), rng.uniform(1, 2.5))
         eta = rng.uniform(19, 26)
         choice = SpeedChoice([FuelCost(KCS_SHIP, fc, T0, k * KNOT, frozen=False, currents=True) for k in SPEEDS])
-        out.append({"case": case} | gap(graph, a, b, choice, eta))
+        out.append({"case": case} | gap(graph, a, b, choice, eta, args.dt_hours, args.max_labels))
         print(out[-1], flush=True)
     return out
 
@@ -105,7 +114,7 @@ def real(args) -> list[dict]:
         for kn in SPEEDS:
             w = AddedResistanceTable.between(args.tables, KCS_SHIP.seakeeping, kn * KNOT) if args.tables else None
             costs.append(FuelCost(KCS_SHIP, fc, t, kn * KNOT, w, frozen=False, currents=True))
-        out.append({"case": case, "stretch": name, "run": str(t)} | gap(graph, a, b, SpeedChoice(costs), eta))
+        out.append({"case": case, "stretch": name, "run": str(t)} | gap(graph, a, b, SpeedChoice(costs), eta, args.dt_hours, args.max_labels))
         print(out[-1], flush=True)
     return out
 
@@ -115,7 +124,11 @@ def main() -> None:
     sub = parser.add_subparsers(dest="cmd", required=True)
     p = sub.add_parser("synthetic")
     p.add_argument("--cases", type=int, default=14)
+    p.add_argument("--dt-hours", type=float, default=0.1, help="time bucket of the exact search")
+    p.add_argument("--max-labels", type=int, default=5_000_000, help="give a case up after this many labels")
     p = sub.add_parser("real")
+    p.add_argument("--dt-hours", type=float, default=0.1, help="time bucket of the exact search")
+    p.add_argument("--max-labels", type=int, default=5_000_000, help="give a case up after this many labels")
     p.add_argument("land", help="land polygons shapefile")
     p.add_argument("--runs", required=True)
     p.add_argument("--tables")
@@ -124,10 +137,11 @@ def main() -> None:
 
     add_sea_args(p)
     args = parser.parse_args()
-    rows = synthetic(args.cases) if args.cmd == "synthetic" else real(args)
-    gaps = np.array([r["gap_pct"] for r in rows])
-    print(f"{len(gaps)} cases: median gap {np.median(gaps):.3f}%, largest {gaps.max():.3f}%, over 0.5%: {(gaps > 0.5).sum()},"
-          f" same path in {sum(r['same_path'] for r in rows)}")
+    rows = synthetic(args) if args.cmd == "synthetic" else real(args)
+    done = [r for r in rows if "gap_pct" in r]
+    gaps = np.array([r["gap_pct"] for r in done])
+    print(f"{len(rows)} cases, {len(rows) - len(done)} given up: median gap {np.median(gaps):.3f}%, largest {gaps.max():.3f}%,"
+          f" over 0.5%: {(gaps > 0.5).sum()}, same path in {sum(r['same_path'] for r in done)}" if len(done) else f"{len(rows)} cases, all given up")
 
 
 if __name__ == "__main__":

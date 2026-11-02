@@ -27,10 +27,13 @@ from shiprouting.sea.quadtree import Graph
 
 
 def least_fuel_by(graph: Graph, s: int, g: int, choice: SpeedChoice, eta_hours: float, dt_hours: float = 0.1,
-                  max_current: float = 2.5, max_labels: int = 5_000_000, max_seconds: float = math.inf) -> SearchResult:
+                  max_current: float = 2.5, max_labels: int = 5_000_000, max_seconds: float = math.inf,
+                  upper_kg: float = math.inf) -> SearchResult:
     """The least-fuel path from node s to node g arriving within eta_hours, each move at one of
-    choice's speeds. max_current (m/s) bounds the current that can help, for pruning. The
-    result's cost is the fuel, kg, and its clock the hours at each point."""
+    choice's speeds. max_current (m/s) bounds the current that can help, for pruning. upper_kg:
+    the fuel of a path known to arrive in time (meet_eta's, say); labels burning that much are
+    dropped from the start, and if none does better a ValueError says so. The result's cost is
+    the fuel, kg, and its clock the hours at each point."""
     t0 = time.perf_counter()
     fastest_kmh = (max(c.speed for c in choice.costs) + max_current) * 3.6
     to_goal_h = haversine_km(graph.lat, graph.lon, graph.lat[g], graph.lon[g]) / fastest_kmh
@@ -39,6 +42,10 @@ def least_fuel_by(graph: Graph, s: int, g: int, choice: SpeedChoice, eta_hours: 
     heap = [(0.0, 0)]
     dead = set()
     goal = None
+
+    def bound():
+        return labels_f[goal] if goal is not None else upper_kg
+
     while heap:
         t, lab = heapq.heappop(heap)
         if lab in dead:
@@ -48,7 +55,7 @@ def least_fuel_by(graph: Graph, s: int, g: int, choice: SpeedChoice, eta_hours: 
             if goal is None or f < labels_f[goal]:
                 goal = lab
             continue
-        if goal is not None and f >= labels_f[goal]:
+        if f >= bound():
             continue  # fuel only grows
         if len(labels_t) > max_labels or time.perf_counter() - t0 > max_seconds:
             raise TimeoutError(f"stopped with {len(labels_t)} labels after {time.perf_counter() - t0:.0f} s")
@@ -63,7 +70,7 @@ def least_fuel_by(graph: Graph, s: int, g: int, choice: SpeedChoice, eta_hours: 
                 nn, tn, fn = int(n[m]), t + float(h_m), f + float(kg_m)
                 if tn + to_goal_h[nn] > eta_hours * (1 + 1e-9):
                     continue
-                if goal is not None and fn >= labels_f[goal]:
+                if fn >= bound():
                     continue
                 key = (nn, int(tn // dt_hours))
                 others = kept.get(key, [])
@@ -80,7 +87,7 @@ def least_fuel_by(graph: Graph, s: int, g: int, choice: SpeedChoice, eta_hours: 
                 kept[key] = [o for o in others if o not in dead] + [new]
                 heapq.heappush(heap, (tn, new))
     if goal is None:
-        raise ValueError(f"no path arrives within {eta_hours:g} h ({len(labels_t)} labels)")
+        raise ValueError(f"no path arrives within {eta_hours:g} h burning less than {upper_kg:g} kg ({len(labels_t)} labels)")
     path = [goal]
     while labels_parent[path[-1]] >= 0:
         path.append(labels_parent[path[-1]])
