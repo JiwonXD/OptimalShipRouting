@@ -11,7 +11,7 @@ dependencies = ["numba", "numpy", "shapely"]
 
 [project.optional-dependencies]
 dev = ["pytest"]
-weather = ["eccodes", "ecmwf-opendata"]
+weather = ["eccodes", "ecmwf-opendata", "numcodecs"]
 sea = ["h5py", "pyogrio", "scipy"]
 
 [tool.setuptools.packages.find]
