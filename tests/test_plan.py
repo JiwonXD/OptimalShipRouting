@@ -166,7 +166,7 @@ def test_the_shortest_route_is_kept_when_the_search_finds_nothing_better(monkeyp
     import dataclasses
 
     retime = plan_module.SpeedChoice.retime
-    monkeypatch.setattr(plan_module.SpeedChoice, "retime", lambda self, r, eta: dataclasses.replace(retime(self, r, eta), cost=1e9))
+    monkeypatch.setattr(plan_module.SpeedChoice, "retime", lambda self, r, eta, **kw: dataclasses.replace(retime(self, r, eta, **kw), cost=1e9))
     via = [(4.5, 152.5)]
     out = plan(70.0, via=via, land=LAND)
     short, best = out["shortest"], out["least_fuel"]
