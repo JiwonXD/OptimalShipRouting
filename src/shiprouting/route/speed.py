@@ -156,6 +156,81 @@ class SpeedChoice:
         km = float(haversine_km(p_lat[:-1], p_lon[:-1], p_lat[1:], p_lon[1:]).sum())
         return dataclasses.replace(r, lat=p_lat, lon=p_lon, on_link=np.array(on_link, bool), km=km, clock=np.array(clock))
 
+    def relax(self, land: Land, r: SearchResult, keep_points=(), step_km: float = 16.0, min_km: float = 0.25,
+              max_sweeps: int = 400) -> SearchResult:
+        """Move a path's points sideways where that is cheaper, off the grid's eight directions.
+
+        The cells only join in eight directions, and cutting corners (shortcut) keeps to the way
+        the found path went, so a path that should curve across open sea stays some way off its
+        best line. Each point in turn is moved step_km to either side of the line between its
+        neighbours; the move is kept if the two segments it joins, at their speeds and times,
+        then arrive no later and burn no more fuel, one of them strictly, and miss land. Odd and
+        even points take turns, so each move is judged against fixed neighbours. When a sweep
+        keeps nothing the step is halved, down to min_km. Links, the two ends and keep_points stay.
+        """
+        n = len(r.lat) - 1
+        if n < 2:
+            return r
+        k = self.speed_index(r)
+        fixed = np.zeros(n + 1, bool)
+        fixed[[0, -1, *keep_points]] = True
+        fixed[:-1] |= r.on_link
+        fixed[1:] |= r.on_link
+        lat, lon, clock = r.lat.copy(), r.lon.copy(), r.clock.copy()
+
+        def unit(la, lo):
+            p, q = np.radians(la), np.radians(lo)
+            return np.stack([np.cos(p) * np.cos(q), np.cos(p) * np.sin(q), np.sin(p)])
+
+        def pair(la, lo, i):
+            """Fuel and hours of segments i-1 and i, through the points (la, lo) in place of point i."""
+            kg1, h1 = self.kg_hours(lat[i - 1], lon[i - 1], la, lo, clock[i - 1])
+            kg1, h1 = kg1[k[i - 1], np.arange(len(i))], h1[k[i - 1], np.arange(len(i))]
+            kg2, h2 = self.kg_hours(la, lo, lat[i + 1], lon[i + 1], clock[i - 1] + h1)
+            return kg1 + kg2[k[i], np.arange(len(i))], h1 + h2[k[i], np.arange(len(i))]
+
+        step, sweeps = step_km, 0
+        while step >= min_km and sweeps < max_sweeps:
+            sweeps += 1
+            moved = 0
+            for parity in (1, 2):
+                i = np.arange(parity, n, 2)
+                i = i[~fixed[i]]
+                if not len(i):
+                    continue
+                kg0, h0 = pair(lat[i], lon[i], i)
+                a, b, p = unit(lat[i - 1], lon[i - 1]), unit(lat[i + 1], lon[i + 1]), unit(lat[i], lon[i])
+                side = np.cross(a, b, axis=0)
+                side /= np.maximum(np.linalg.norm(side, axis=0), 1e-15)
+                best = np.zeros(len(i), bool)
+                for sign in (1.0, -1.0):
+                    d = sign * step / 6371.0088
+                    q = np.cos(d) * p + np.sin(d) * side
+                    q_lat = np.degrees(np.arctan2(q[2], np.hypot(q[0], q[1])))
+                    q_lon = np.degrees(np.arctan2(q[1], q[0]))
+                    q_lon = lon[i] + (q_lon - lon[i] + 180) % 360 - 180
+                    kg1, h1 = pair(q_lat, q_lon, i)
+                    better = ((kg1 <= kg0) & (h1 <= h0 * (1 + 1e-12)) & ((kg1 < kg0 * (1 - 1e-9)) | (h1 < h0 * (1 - 1e-9))) & ~best
+                              & np.isfinite(kg1))
+                    if better.any():
+                        j = np.nonzero(better)[0]
+                        ok = ~(arcs_on_land(land, lat[i[j] - 1], lon[i[j] - 1], q_lat[j], q_lon[j])
+                               | arcs_on_land(land, q_lat[j], q_lon[j], lat[i[j] + 1], lon[i[j] + 1]))
+                        j = j[ok]
+                        lat[i[j]], lon[i[j]] = q_lat[j], q_lon[j]
+                        kg0[j], h0[j] = kg1[j], h1[j]
+                        best[j] = True
+                moved += int(best.sum())
+                path = dataclasses.replace(r, lat=lat, lon=lon)
+                _, h = self.segments(path, clock[:-1])
+                clock = clock[0] + np.r_[0.0, np.cumsum(h[k, np.arange(n)])]
+            if moved == 0:
+                step /= 2
+        lon = (lon + 180) % 360 - 180
+        out = dataclasses.replace(r, lat=lat, lon=lon, km=float(haversine_km(lat[:-1], lon[:-1], lat[1:], lon[1:]).sum()))
+        clock, kg, _ = self.sail(out, k)
+        return dataclasses.replace(out, clock=clock, cost=float(kg[k, np.arange(n)].sum()))
+
     def fill_slack(self, r: SearchResult, eta_hours: float, rounds: int = 20) -> SearchResult:
         """Spend the time a found path leaves before eta_hours: step segments down to the next
         slower speed, those saving the most fuel per extra hour first. Each round re-sails the
