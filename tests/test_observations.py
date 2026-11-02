@@ -45,3 +45,16 @@ def test_altimeter_blocks_are_whole_and_averaged_across_the_dateline():
     assert len(b["time"]) == 1  # the second block lost a point, the third is short
     assert b["time"][0] == np.datetime64("2026-09-01T00:00:03") and b["Hs"][0] == 2.0
     assert b["lon"][0] == pytest.approx(179.7, abs=1e-9)
+
+
+def test_buoy_observations_are_averaged_to_the_nearest_hour(tmp_path):
+    (tmp_path / "station_table.txt").write_text(
+        "# STATION_ID | OWNER | TTYPE | HULL | NAME | PAYLOAD | LOCATION | TIMEZONE | FORECAST | NOTE\n"
+        "46006|NDBC|Weather Buoy|6N|PAPA|SCOOP|40.782 N 137.397 W (x)| | |\n")
+    (tmp_path / "46006.csv").write_text("time,WSPD,WVHT\n2026-09-20T00:40:00,6.0,2.0\n2026-09-20T00:50:00,8.0,nan\n"
+                                        "2026-09-20T01:10:00,10.0,3.0\n2026-09-20T01:40:00,nan,4.0\n")
+    o = buoys.load_buoys(str(tmp_path))
+    assert list(o["time"].astype(str)) == ["2026-09-20T01:00:00", "2026-09-20T02:00:00"]
+    factor = np.log(10.0 / buoys.Z0_M) / np.log(buoys.ANEMOMETER_M / buoys.Z0_M)
+    assert o["wind"][0] == pytest.approx(8.0 * factor) and np.isnan(o["wind"][1])
+    assert o["Hs"][0] == pytest.approx(2.5) and o["Hs"][1] == 4.0

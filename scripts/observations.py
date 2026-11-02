@@ -12,8 +12,8 @@ altimeters: significant wave height along the satellite tracks, Copernicus Marin
 WAVE_GLO_PHY_SWH_L3_NRT_014_001 (1 Hz, filtered VAVH; needs copernicusmarine and a login),
 averaged over blocks of BLOCK_S seconds (about 40 km of track, near the 0.25° model grid), one
 file per mission and month.
-compare: every hourly buoy observation of significant wave height (WVHT) and wind speed (WSPD),
-and every altimeter block of Hs, against each source at the place, bilinear in space and
+compare: buoy significant wave height (WVHT) and wind speed (WSPD), averaged over the half
+hour either side of each whole hour, and every altimeter block of Hs, against each source at the place, bilinear in space and
 linear in time. The buoys measure wind at their anemometer, about 4 m up on the common 3 m
 discus hulls, so it is taken to 10 m with a neutral log profile (z0 = 0.2 mm); NDBC does not
 list the height in the files, so this is an approximation and the wind bias is reported as
@@ -120,24 +120,31 @@ def cmd_buoys(args) -> None:
 
 
 def load_buoys(folder: str) -> dict[str, np.ndarray]:
-    """lat, lon, time, wind at 10 m and Hs of every hourly observation in folder."""
+    """lat, lon, time, wind at 10 m and Hs of every station and hour in folder: the mean of each
+    variable's observations within half an hour of it (the buoys report every 10 minutes, the
+    waves mostly at :10 and :40)."""
     with open(os.path.join(folder, "station_table.txt"), encoding="ascii", errors="replace") as f:
         where = stations(f.read())
-    out = []
+    out = {k: [] for k in ("lat", "lon", "time", "wind", "Hs")}
     for name in sorted(os.listdir(folder)):
         if not name.endswith(".csv") or name[:-4] not in where:
             continue
         with open(os.path.join(folder, name)) as f:
             rows = list(csv.DictReader(f))
         t = np.array([r["time"] for r in rows], "datetime64[s]")
-        top = t.astype("datetime64[m]").astype(int) % 60 == 0  # whole hours only, as the models
+        hour = ((t + np.timedelta64(30, "m")).astype("datetime64[h]")).astype("datetime64[s]")  # the nearest whole hour
+        hours, k = np.unique(hour, return_inverse=True)
         la, lo = where[name[:-4]]
-        wind = np.array([float(r["WSPD"]) for r in rows]) * np.log(10.0 / Z0_M) / np.log(ANEMOMETER_M / Z0_M)
-        hs = np.array([float(r["WVHT"]) for r in rows])
-        out += [(la, lo, tt, ww, hh) for tt, ww, hh, ok in zip(t, wind, hs, top) if ok]
-    return {"lat": np.array([o[0] for o in out]), "lon": np.array([o[1] for o in out]),
-            "time": np.array([o[2] for o in out], "datetime64[s]"), "wind": np.array([o[3] for o in out]),
-            "Hs": np.array([o[4] for o in out])}
+        out["lat"].append(np.full(len(hours), la))
+        out["lon"].append(np.full(len(hours), lo))
+        out["time"].append(hours)
+        for key, col, factor in (("wind", "WSPD", np.log(10.0 / Z0_M) / np.log(ANEMOMETER_M / Z0_M)), ("Hs", "WVHT", 1.0)):
+            v = np.array([float(r[col]) for r in rows]) * factor
+            ok = np.isfinite(v)
+            total, count = np.bincount(k[ok], v[ok], len(hours)), np.bincount(k[ok], minlength=len(hours))
+            with np.errstate(invalid="ignore"):
+                out[key].append(np.where(count > 0, total / count, np.nan))
+    return {key: np.concatenate(v) for key, v in out.items()}
 
 
 def blocks(time, lat, lon, hs, seconds: int = BLOCK_S) -> dict[str, np.ndarray]:
