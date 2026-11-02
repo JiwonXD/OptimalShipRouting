@@ -5,6 +5,7 @@ import pytest
 
 from shiprouting.fuel import waves
 from shiprouting.fuel.ships import KCS_SHIP
+from shiprouting.route.evaluate import Sea, recost
 from shiprouting.route.voyage import voyage
 from shiprouting.weather.forecast import Forecast
 from test_fuel_route import NAMES, T0
@@ -52,3 +53,20 @@ def test_a_voyage_replanned_in_the_weather_forecast_sails_as_planned():
                   speeds_kn=(12, 16, 20), every_hours=math.inf)
     assert once["sailed"]["plans"] == 1
     assert once["sailed"]["fuel_t"] == pytest.approx(out["planned"]["least_fuel_t"], rel=1e-3)
+
+
+def test_a_saved_voyage_sailed_again_in_the_same_weather_burns_the_same():
+    fc = steady(wind_u=-10.0, Hs=2.0, wave_from_x=1.0, T_m10=8.0, current_u=0.3)
+    deadline = T0 + np.timedelta64(45 * 3600, "s")
+    out = voyage(GRAPH, KCS_SHIP, LAND, Same(fc), fc, START, GOAL, T0, deadline, via=[(4.5, 152.5)],
+                 speeds_kn=(12, 16, 20), every_hours=8.0)
+    again = voyage(GRAPH, KCS_SHIP, LAND, Same(fc), fc, START, GOAL, T0, deadline, via=[(4.5, 152.5)],
+                   speeds_kn=(12, 16, 20), every_hours=8.0)
+    for name in ("shortest", "sailed"):
+        assert again[name]["segment_kg"] == out[name]["segment_kg"]  # the same inputs give the same voyage
+        same = recost(out, Sea(KCS_SHIP, fc, T0), (12, 16, 20))[name]
+        assert same["fuel_t"] == pytest.approx(out[name]["fuel_t"], rel=1e-4)
+        assert same["hours"] == pytest.approx(out[name]["hours"], rel=1e-4)
+    calm = recost(out, Sea(KCS_SHIP, steady(), T0), (12, 16, 20))
+    assert calm["sailed"]["fuel_t"] < out["sailed"]["fuel_t"]  # judged in other weather
+    assert calm["sailed"]["lat"] == out["sailed"]["lat"]  # on the same track

@@ -7,8 +7,8 @@ The weather that came is pieced together from the first 21 h of each daily run
 00z run some 7–8 h later, so a ship leaving at 00z plans on the day before's run.
 
 The ship sails each plan's segments at their planned speeds through the water, in the
-weather and current that came. Where that needs more than the engine's MCR, it takes the
-fastest slower speed it can make. A plan is followed up to its first point, at or after
+weather and current that came (evaluate.Sea). Where that needs more than the engine's MCR,
+it takes the fastest slower speed it can make. A plan is followed up to its first point, at or after
 the next time to replan, that is a cell of the graph and not inside a link; the next plan
 starts there, for the waypoints still ahead and the same deadline. When a plan can no
 longer meet the deadline, its deadline is moved out until it can, and the voyage is late.
@@ -23,8 +23,7 @@ import time
 import numpy as np
 
 from shiprouting.fuel.ship import Ship
-from shiprouting.fuel.waves import AddedResistanceTable
-from shiprouting.route.fuel import KNOT, FuelCost
+from shiprouting.route.evaluate import Sea, track
 from shiprouting.route.plan import SPEEDS_KN, plan
 from shiprouting.sea.latlon import haversine_km
 from shiprouting.sea.quadtree import Graph
@@ -63,48 +62,6 @@ class Runs:
         return self._run, self._forecast
 
 
-class Came:
-    """Sailing in the weather that came, at given speeds through the water."""
-
-    def __init__(self, ship: Ship, came: Forecast, departure, tables: str | None = None):
-        self.ship, self.came, self.departure, self.tables = ship, came, np.datetime64(departure, "s"), tables
-        self._costs = {}
-
-    def cost(self, kn: float) -> FuelCost:
-        if kn not in self._costs:
-            speed = kn * KNOT
-            waves = (AddedResistanceTable.between(self.tables, self.ship.seakeeping, speed) if self.tables
-                     else AddedResistanceTable.build(self.ship.seakeeping, speed))
-            self._costs[kn] = FuelCost(self.ship, self.came, self.departure, speed, waves, frozen=False, currents=True)
-        return self._costs[kn]
-
-    def sail(self, lat, lon, on_link, kn, offered, clock0: float, until: float = math.inf, stops=None):
-        """Sail the segments from clock0 (hours since departure) at speeds kn, each falling back to
-        the fastest slower speed (of kn's and offered) where the engine cannot make it. Stops at the
-        first point j with stops[j] reached at or after until. Returns the fuel, kg, hours and speed
-        of each segment sailed, and the index of the point it stopped at."""
-        offered = sorted({*np.round(kn, 6), *offered})
-        seg_km = haversine_km(lat[:-1], lon[:-1], lat[1:], lon[1:])
-        kg, hours, sailed = [], [], []
-        clock = clock0
-        for i in range(len(seg_km)):
-            for v in [k for k in offered if k <= round(kn[i], 6)][::-1]:
-                c = self.cost(v)
-                if on_link[i]:
-                    kg_i, h_i = seg_km[i] * c.calm_kg_per_km, seg_km[i] / (c.speed * 3.6)
-                else:
-                    kg_i, h_i = (float(x) for x in c.kg_hours(lat[i], lon[i], lat[i + 1], lon[i + 1], clock))
-                if math.isfinite(kg_i):
-                    break
-            kg.append(kg_i)
-            hours.append(h_i)
-            sailed.append(v)
-            clock += h_i
-            if clock >= until and stops is not None and stops[i + 1]:
-                return np.array(kg), np.array(hours), np.array(sailed), i + 1
-        return np.array(kg), np.array(hours), np.array(sailed), len(seg_km)
-
-
 def voyage(graph: Graph, ship: Ship, land, runs: Runs, came: Forecast, start, goal, departure, deadline, via=(),
            speeds_kn=SPEEDS_KN, tables: str | None = None, every_hours: float = 24.0, max_tries: int = 12,
            max_seconds: float = math.inf) -> dict:
@@ -112,10 +69,10 @@ def voyage(graph: Graph, ship: Ship, land, runs: Runs, came: Forecast, start, go
     weather that came; and the first plan's shortest route sailed there too."""
     departure, deadline = np.datetime64(departure, "s"), np.datetime64(deadline, "s")
     hours = float((deadline - departure) / HOUR)
-    sea = Came(ship, came, departure, tables)
+    sea = Sea(ship, came, departure, tables)
     cells = {(round(float(a), 6), round(float(b), 6)) for a, b in zip(graph.lat, graph.lon)}
     pos, ahead, at = tuple(start), list(via), 0.0
-    track = {"lat": [], "lon": [], "on_link": [], "segment_kn": [], "kg": [], "hours": []}
+    sailed_track = {"lat": [], "lon": [], "on_link": [], "planned_kn": [], "segment_kn": [], "kg": [], "hours": []}
     log, first, late, prices = [], None, False, None
     while True:
         now = departure + int(round(at * 3600)) * np.timedelta64(1, "s")
@@ -146,15 +103,17 @@ def voyage(graph: Graph, ship: Ship, land, runs: Runs, came: Forecast, start, go
             "sailed_km": round(float(seg_km.sum()), 1), "sailed_h": round(float(h.sum()), 1), "sailed_t": round(float(kg.sum()) / 1000, 2),
         })  # fmt: skip
         print(f"  {log[-1]}", flush=True)
-        if not track["lat"]:
-            track["lat"].append(float(lat[0]))
-            track["lon"].append(float(lon[0]))
-        track["lat"] += lat[1 : end + 1].tolist()
-        track["lon"] += lon[1 : end + 1].tolist()
-        track["on_link"] += on_link[:end].tolist()
-        track["segment_kn"] += sailed.tolist()
-        track["kg"] += kg.tolist()
-        track["hours"] += h.tolist()
+        t = sailed_track
+        if not t["lat"]:
+            t["lat"].append(float(lat[0]))
+            t["lon"].append(float(lon[0]))
+        t["lat"] += lat[1 : end + 1].tolist()
+        t["lon"] += lon[1 : end + 1].tolist()
+        t["on_link"] += on_link[:end].tolist()
+        t["planned_kn"] += kn[:end].tolist()
+        t["segment_kn"] += sailed.tolist()
+        t["kg"] += kg.tolist()
+        t["hours"] += h.tolist()
         at += float(h.sum())
         legs_km = np.cumsum([leg["km"] for leg in f["legs"]])[:-1]
         passed = int((legs_km <= seg_km.sum() + 0.01).sum())
@@ -164,26 +123,16 @@ def voyage(graph: Graph, ship: Ship, land, runs: Runs, came: Forecast, start, go
         pos = (float(lat[end]), float(lon[end]))
 
     s = first["shortest"]
-    s_lat, s_lon = np.array(s["lat"]), np.array(s["lon"])
-    s_kg, s_h, _, _ = sea.sail(s_lat, s_lon, np.array(s["on_link"], bool), np.array(s["segment_kn"]), speeds_kn, 0.0)
+    s_lat, s_lon, s_link, s_kn = np.array(s["lat"]), np.array(s["lon"]), np.array(s["on_link"], bool), np.array(s["segment_kn"])
+    s_kg, s_h, s_sailed, _ = sea.sail(s_lat, s_lon, s_link, s_kn, speeds_kn, 0.0)
+    t = {k: np.array(v) for k, v in sailed_track.items()}
     return {
         "departure": str(departure), "deadline": str(deadline), "hours": hours, "every_hours": every_hours,
         "planned": {"shortest_t": s["fuel_t"], "least_fuel_t": first["least_fuel"]["fuel_t"]},
-        "shortest": summary(s_lat, s_lon, s_kg, s_h, hours),
-        "sailed": summary(np.array(track["lat"]), np.array(track["lon"]), np.array(track["kg"]), np.array(track["hours"]), hours)
-        | {"plans": len(log), "deadline_moved": late, "log": log, "on_link": track["on_link"], "segment_kn": track["segment_kn"]},
+        "shortest": track(s_lat, s_lon, s_link, s_kn, s_kg, s_h, s_sailed, hours),
+        "sailed": track(t["lat"], t["lon"], t["on_link"], t["planned_kn"], t["kg"], t["hours"], t["segment_kn"], hours)
+        | {"plans": len(log), "deadline_moved": late, "log": log},
     }  # fmt: skip
-
-
-def summary(lat, lon, kg, h, hours: float) -> dict:
-    return {
-        "km": round(float(haversine_km(lat[:-1], lon[:-1], lat[1:], lon[1:]).sum()), 1),
-        "hours": round(float(h.sum()), 1),
-        "late_h": round(max(float(h.sum()) - hours, 0.0), 1),
-        "fuel_t": round(float(kg.sum()) / 1000, 2),
-        "lat": np.round(lat, 4).tolist(),
-        "lon": np.round(lon, 4).tolist(),
-    }
 
 
 def main() -> None:
@@ -222,7 +171,7 @@ def main() -> None:
     speeds = [float(v) for v in args.speeds_kn.split(",")]
     out = voyage(graph, KCS_SHIP, land, runs, came, start, goal, departure, deadline, via, speeds, args.tables,
                  args.every_hours or math.inf, args.max_tries, args.max_seconds)
-    print({k: ({kk: vv for kk, vv in v.items() if kk not in ("lat", "lon", "on_link", "segment_kn", "log")} if isinstance(v, dict) else v)
+    print({k: ({kk: vv for kk, vv in v.items() if not isinstance(vv, list)} if isinstance(v, dict) else v)
            for k, v in out.items()}, flush=True)
     with open(args.out, "w", encoding="utf-8") as f:
         json.dump(out, f, ensure_ascii=False)
