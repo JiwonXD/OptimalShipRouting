@@ -11,6 +11,7 @@ on. voyage.py sails its plans here; recost() sails the tracks of a saved voyage 
 weather.
 """
 
+import dataclasses
 import math
 
 import numpy as np
@@ -101,4 +102,37 @@ def recost(result: dict, sea: Sea, speeds_kn) -> dict:
         kn = np.array(t.get("planned_kn", t["segment_kn"]), float)
         kg, h, sailed, _ = sea.sail(lat, lon, np.array(t["on_link"], bool), kn, speeds_kn, 0.0)
         out[name] = track(lat, lon, t["on_link"], kn, kg, h, sailed, result["hours"])
+    return out
+
+
+def on_time(result: dict, sea: Sea, speeds_kn) -> dict:
+    """Each track of a saved voyage ("shortest", "sailed") sailed again in sea's weather with its
+    speeds chosen again (SpeedChoice.retime, of speeds_kn) for the least fuel that arrives by the
+    voyage's deadline: the same track judged at the same arrival time, as a ship that keeps to its
+    schedule would sail it. A track that cannot make the deadline is sailed at the fastest speed.
+    The speeds are chosen knowing the weather ahead, so this is the fuel of the track, not of a
+    strategy that has to guess."""
+    from shiprouting.route.speed import SpeedChoice
+    from shiprouting.sea.latlon import SearchResult
+
+    choice = SpeedChoice([sea.cost(k) for k in sorted(speeds_kn)])
+    out = {}
+    for name in ("shortest", "sailed"):
+        t = result.get(name)
+        if not t or "on_link" not in t:
+            continue
+        lat, lon, on_link = np.array(t["lat"]), np.array(t["lon"]), np.array(t["on_link"], bool)
+        fastest = np.full(len(on_link), len(speeds_kn) - 1)
+        r = SearchResult(lat, lon, on_link, [], 0.0, 0, 0.0, clock=np.zeros(len(lat)))
+        clock, kg, _ = choice.sail(r, fastest)
+        r = dataclasses.replace(r, clock=clock, cost=float(kg[fastest, np.arange(len(fastest))].sum()))
+        try:  # the time a little later is worth about 2 x fuel / hours (fuel ~ distance^3 / hours^2)
+            r = choice.retime(r, result["hours"], per_hour=2 * r.cost / result["hours"])
+        except ValueError:
+            pass  # not even the fastest speeds arrive in time: sailed at them
+        k = choice.speed_index(r)
+        _, kg_all, h_all = choice.sail(r, k)
+        seg = np.arange(len(k))
+        out[name] = track(lat, lon, on_link, np.array(sorted(speeds_kn), float)[k], kg_all[k, seg], h_all[k, seg],
+                          np.array(sorted(speeds_kn), float)[k], result["hours"])
     return out

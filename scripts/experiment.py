@@ -4,7 +4,7 @@ collect the results.
     python scripts/experiment.py deadlines MATRIX LAND --runs DIR [sea options]
     python scripts/experiment.py run MATRIX OUT LAND --season summer [--only busan_la,...] [sea options] [--tables DIR]
     python scripts/experiment.py table OUT result.csv
-    python scripts/experiment.py recost RESULT.json... --runs DIR [--tables DIR] [--era5 DIR --cmems DIR]
+    python scripts/experiment.py recost RESULT.json... --runs DIR [--tables DIR] [--era5 DIR --cmems DIR] [--on-time]
     python scripts/experiment.py backfill RESULT.json... --runs DIR --out DIR [--tables DIR]
 
 deadlines: the routes with no hours yet get the shortest route's distance at 15 kn, rounded up to
@@ -17,6 +17,8 @@ table: one row per route and departure, the strategies side by side.
 recost: sail the tracks of saved voyages again in the weather that came (evaluate.recost)
 and compare with the fuel they were saved with. With --era5 the weather that came is ERA5 wind
 and waves with Copernicus Marine currents (--cmems) instead of the ECMWF forecasts' first hours.
+With --on-time each track's speeds are chosen again to arrive by the deadline in that weather
+(evaluate.on_time), so the routes are compared at the same arrival time.
 backfill: results saved before the shortest route kept its speeds (v25) get them back, so that
 recost can sail it: the one speed through the water that, sailed in the weather that came, takes
 the hours it was saved with (bisection), and no links (on_link all false: a canal is sailed in
@@ -37,7 +39,7 @@ import time
 import numpy as np
 
 from shiprouting.fuel.ships import KCS_SHIP
-from shiprouting.route.evaluate import Sea, recost
+from shiprouting.route.evaluate import Sea, on_time, recost
 from shiprouting.route.plan import SPEEDS_KN, add_sea_args, plan, sea_graph
 from shiprouting.route.voyage import HOUR, Runs, came_files, voyage
 from shiprouting.weather import ecmwf, era5
@@ -153,12 +155,12 @@ def cmd_recost(args) -> None:
         departure, deadline = np.datetime64(v["departure"], "s"), np.datetime64(v["deadline"], "s")
         weather = truth_weather(args.era5, args.cmems, departure, deadline) if args.era5 else came_weather(runs, departure, deadline)
         sea = Sea(KCS_SHIP, weather, departure, args.tables)
-        again = recost(v, sea, SPEEDS_KN)
+        again = on_time(v, sea, SPEEDS_KN) if args.on_time else recost(v, sea, SPEEDS_KN)
         for name, t in again.items():
             d = 100 * (t["fuel_t"] - v[name]["fuel_t"]) / v[name]["fuel_t"]
             worst = max(worst, abs(d))
             print(f"{os.path.basename(path)} {name}: saved {v[name]['fuel_t']} t {v[name]['hours']} h,"
-                  f" again {t['fuel_t']} t {t['hours']} h ({d:+.3f}%)", flush=True)
+                  f" again {t['fuel_t']} t {t['hours']} h, late {t['late_h']} h ({d:+.3f}%)", flush=True)
         if {"shortest", "sailed"} <= again.keys():
             was, now = (100 * (w["shortest"]["fuel_t"] - w["sailed"]["fuel_t"]) / w["shortest"]["fuel_t"] for w in (v, again))
             print(f"{os.path.basename(path)} saving over the shortest route: saved {was:+.2f}%, again {now:+.2f}%", flush=True)
@@ -224,6 +226,7 @@ def main() -> None:
     p.add_argument("--tables")
     p.add_argument("--era5", help="folder of ERA5 days (weather.era5): sail in these instead of the forecasts")
     p.add_argument("--cmems", help="folder of Copernicus Marine current days (weather.cmems), with --era5")
+    p.add_argument("--on-time", action="store_true", help="choose each track's speeds again to arrive by the deadline")
     p = sub.add_parser("backfill")
     p.add_argument("results", nargs="+")
     p.add_argument("--runs", required=True)

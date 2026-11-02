@@ -70,3 +70,20 @@ def test_a_saved_voyage_sailed_again_in_the_same_weather_burns_the_same():
     calm = recost(out, Sea(KCS_SHIP, steady(), T0), (12, 16, 20))
     assert calm["sailed"]["fuel_t"] < out["sailed"]["fuel_t"]  # judged in other weather
     assert calm["sailed"]["lat"] == out["sailed"]["lat"]  # on the same track
+
+
+def test_on_time_keeps_the_track_and_chooses_speeds_that_arrive_by_the_deadline():
+    from shiprouting.route.evaluate import on_time, track
+
+    sea = Sea(KCS_SHIP, steady(Hs=2.0, T_m10=8.0, wave_from_x=1.0, wind_u=-8.0), T0)
+    lat, lon = np.zeros(7), np.linspace(150.0, 153.0, 7)
+    on_link = np.zeros(6, bool)
+    km = 3.0 * 111.195
+    hours = km / (15.0 * 1.852)  # needs 15 kn on average; planned at 14 kn, it is late
+    kg, h, sailed, _ = sea.sail(lat, lon, on_link, np.full(6, 14.0), (12, 14, 16), 0.0)
+    saved = {"hours": hours, "sailed": track(lat, lon, on_link, np.full(6, 14.0), kg, h, sailed, hours)}
+    assert saved["sailed"]["late_h"] > 0
+    out = on_time(saved, sea, (12, 14, 16))["sailed"]
+    assert out["lat"] == saved["sailed"]["lat"] and out["late_h"] == 0.0 and out["hours"] <= round(hours, 1)
+    assert out["fuel_t"] > saved["sailed"]["fuel_t"]  # faster on average than 14 kn
+    assert set(out["segment_kn"]) <= {12.0, 14.0, 16.0} and 16.0 in out["segment_kn"]
