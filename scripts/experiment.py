@@ -5,6 +5,7 @@ collect the results.
     python scripts/experiment.py run MATRIX OUT LAND --season summer [--only busan_la,...] [sea options] [--tables DIR]
     python scripts/experiment.py table OUT result.csv
     python scripts/experiment.py recost RESULT.json... --runs DIR [--tables DIR] [--era5 DIR --cmems DIR]
+    python scripts/experiment.py backfill RESULT.json... --runs DIR --out DIR [--tables DIR]
 
 deadlines: the routes with no hours yet get the shortest route's distance at 15 kn, rounded up to
 12 h (printed, to be written into the matrix before any run).
@@ -16,6 +17,11 @@ table: one row per route and departure, the strategies side by side.
 recost: sail the tracks of saved voyages again in the weather that came (evaluate.recost)
 and compare with the fuel they were saved with. With --era5 the weather that came is ERA5 wind
 and waves with Copernicus Marine currents (--cmems) instead of the ECMWF forecasts' first hours.
+backfill: results saved before the shortest route kept its speeds (v25) get them back, so that
+recost can sail it: the one speed through the water that, sailed in the weather that came, takes
+the hours it was saved with (bisection), and no links (on_link all false: a canal is sailed in
+its weather, not at the calm rate). The fuel sailed again at that speed is printed against the
+saved fuel as a check. Written to --out under the same names; the originals are left alone.
 """
 
 import argparse
@@ -159,6 +165,36 @@ def cmd_recost(args) -> None:
     print(f"largest difference {worst:.3f}%")
 
 
+def cmd_backfill(args) -> None:
+    runs = Runs(args.runs)
+    os.makedirs(args.out, exist_ok=True)
+    for path in args.results:
+        with open(path, encoding="utf-8") as f:
+            v = json.load(f)
+        s = v["shortest"]
+        if "on_link" not in s:
+            departure, deadline = np.datetime64(v["departure"], "s"), np.datetime64(v["deadline"], "s")
+            sea = Sea(KCS_SHIP, came_weather(runs, departure, deadline), departure, args.tables)
+            lat, lon = np.array(s["lat"]), np.array(s["lon"])
+            on_link = np.zeros(len(lat) - 1, bool)
+
+            def sail(kn):
+                kg, h, _, _ = sea.sail(lat, lon, on_link, np.full(len(on_link), kn), SPEEDS_KN, 0.0)  # noqa: B023
+                return float(h.sum()), float(kg.sum())
+
+            lo, hi = min(SPEEDS_KN), max(SPEEDS_KN)
+            for _ in range(30):
+                mid = (lo + hi) / 2
+                lo, hi = (mid, hi) if sail(mid)[0] > s["hours"] else (lo, mid)
+            kn = round((lo + hi) / 2, 4)
+            h, kg = sail(kn)
+            s |= {"on_link": on_link.tolist(), "segment_kn": [kn] * len(on_link), "backfilled_kn": kn}
+            print(f"{os.path.basename(path)}: shortest at {kn} kn, {h:.1f} h (saved {s['hours']} h), {kg / 1000:.2f} t"
+                  f" (saved {s['fuel_t']} t, {100 * (kg / 1000 - s['fuel_t']) / s['fuel_t']:+.3f}%)", flush=True)
+        with open(os.path.join(args.out, os.path.basename(path)), "w", encoding="utf-8") as f:
+            json.dump(v, f, ensure_ascii=False)
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description="Run the pre-registered scenario matrix and collect the results.")
     sub = parser.add_subparsers(dest="cmd", required=True)
@@ -188,13 +224,18 @@ def main() -> None:
     p.add_argument("--tables")
     p.add_argument("--era5", help="folder of ERA5 days (weather.era5): sail in these instead of the forecasts")
     p.add_argument("--cmems", help="folder of Copernicus Marine current days (weather.cmems), with --era5")
+    p = sub.add_parser("backfill")
+    p.add_argument("results", nargs="+")
+    p.add_argument("--runs", required=True)
+    p.add_argument("--out", required=True)
+    p.add_argument("--tables")
     args = parser.parse_args()
     if args.cmd in ("deadlines", "run"):
         with open(args.matrix, encoding="utf-8") as f:
             matrix = json.load(f)
         (cmd_deadlines if args.cmd == "deadlines" else cmd_run)(args, matrix)
     else:
-        (cmd_table if args.cmd == "table" else cmd_recost)(args)
+        {"table": cmd_table, "recost": cmd_recost, "backfill": cmd_backfill}[args.cmd](args)
 
 
 if __name__ == "__main__":
