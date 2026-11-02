@@ -3,6 +3,7 @@ collect the results.
 
     python scripts/experiment.py deadlines MATRIX LAND --runs DIR [sea options]
     python scripts/experiment.py run MATRIX OUT LAND --season summer [--only busan_la,...] [sea options] [--tables DIR]
+        [--oracle ERA5_DIR --cmems DIR]
     python scripts/experiment.py table OUT result.csv
     python scripts/experiment.py recost RESULT.json... --runs DIR [--tables DIR] [--era5 DIR --cmems DIR] [--on-time]
     python scripts/experiment.py backfill RESULT.json... --runs DIR --out DIR [--tables DIR]
@@ -12,7 +13,9 @@ deadlines: the routes with no hours yet get the shortest route's distance at 15 
 run: every route x departure x strategy of a season, one JSON each, written as
 <route>_<YYYYMMDDHH>_<strategy>.json with the code's commit and the weather used. Results
 already there are kept, so a stopped run carries on where it was. The "daily" voyage also
-sails the first plan's shortest route, which is the baseline.
+sails the first plan's shortest route, which is the baseline. With --oracle each voyage is instead
+planned once in the weather that came (ERA5, with currents), known in full from the start, and
+sailed there: the most a plan could save, against which the forecast strategies are measured.
 table: one row per route and departure, the strategies side by side.
 recost: sail the tracks of saved voyages again in the weather that came (evaluate.recost)
 and compare with the fuel they were saved with. With --era5 the weather that came is ERA5 wind
@@ -75,6 +78,16 @@ def truth_weather(era5_dir, cmems_dir, departure, deadline):
     return era5.load([os.path.join(era5_dir, f"era5_{d}.npz") for d in days], np.float32, currents)
 
 
+class Known:
+    """In place of Runs for the oracle: at every time, the weather that comes, known in full."""
+
+    def __init__(self, weather):
+        self.weather = weather
+
+    def newest(self, t):
+        return self.weather.time[0], self.weather
+
+
 def cmd_deadlines(args, matrix) -> None:
     land, graph = sea_graph(args)
     runs = Runs(args.runs)
@@ -96,18 +109,27 @@ def cmd_run(args, matrix) -> None:
         sys.exit(f"routes with no deadline yet: {missing} (run `deadlines` and write them into the matrix)")
     os.makedirs(args.out, exist_ok=True)
     land, graph = sea_graph(args)
-    runs = Runs(args.runs or season["runs"], args.lag_hours)
-    meta = {"commit": commit(), "season": args.season, "weather_plan": "ecmwf open data, newest run out",
-            "weather_came": "ecmwf open data, steps 0-21 h of each daily run", "lag_hours": args.lag_hours}
+    if args.oracle:
+        strategies = {"oracle": 0}
+        meta = {"commit": commit(), "season": args.season, "weather_plan": "the weather that came, known in full (oracle)",
+                "weather_came": "era5" + (" + copernicus marine currents" if args.cmems else "")}
+    else:
+        strategies = matrix["strategies"]
+        runs = Runs(args.runs or season["runs"], args.lag_hours)
+        meta = {"commit": commit(), "season": args.season, "weather_plan": "ecmwf open data, newest run out",
+                "weather_came": "ecmwf open data, steps 0-21 h of each daily run", "lag_hours": args.lag_hours}
     for departure in departures(season):
         for name, r in routes.items():
             deadline = departure + r["hours"] * HOUR
             came = None
-            for strategy, every in matrix["strategies"].items():
+            for strategy, every in strategies.items():
                 path = os.path.join(args.out, f"{name}_{str(departure)[:13].replace('-', '').replace('T', '')}_{strategy}.json")
                 if os.path.exists(path):
                     continue
-                if came is None:
+                if came is None and args.oracle:
+                    came = truth_weather(args.oracle, args.cmems, departure, deadline)
+                    runs = Known(came)
+                elif came is None:
                     came = came_weather(runs, departure, deadline)
                 print(f"{name} {departure} {strategy}", flush=True)
                 t0 = time.perf_counter()
@@ -219,6 +241,9 @@ def main() -> None:
     p.add_argument("--lag-hours", type=float, default=8.0)
     p.add_argument("--max-tries", type=int, default=12)
     p.add_argument("--max-seconds", type=float, default=600.0)
+    p.add_argument("--oracle", metavar="ERA5", help="folder of ERA5 days: plan once in the weather that came, known in full, and sail"
+                   " there (strategy 'oracle'), instead of the matrix's strategies on the forecasts")
+    p.add_argument("--cmems", help="folder of Copernicus Marine current days, with --oracle")
     add_sea_args(p)
     p = sub.add_parser("table")
     p.add_argument("out")
