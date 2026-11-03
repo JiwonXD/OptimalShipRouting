@@ -104,8 +104,19 @@ def saltelli(n: int, rng: np.random.Generator) -> tuple[np.ndarray, np.ndarray, 
 
 
 def sobol(fA, fB, fAB) -> tuple[np.ndarray, np.ndarray]:
-    """First-order and total indices from the results on A, B and AB (Saltelli 2010, Jansen 1999)."""
+    """First-order and total indices from the results on A, B and AB (Saltelli 2010, Jansen 1999).
+    The results are centred first: the S1 estimator multiplies f_B by a difference, so a mean far
+    from 0 (a saving of 1.4 % spread by 0.3 %) makes it scatter widely, though it stays unbiased."""
+    mean = np.mean(np.r_[fA, fB])
+    fA, fB, fAB = fA - mean, fB - mean, fAB - mean
     var = np.var(np.r_[fA, fB])
     S1 = np.mean(fB[None] * (fAB - fA[None]), axis=1) / var
     ST = 0.5 * np.mean((fA[None] - fAB) ** 2, axis=1) / var
     return S1, ST
+
+
+def sobol_interval(fA, fB, fAB, rng: np.random.Generator, rounds: int = 1000) -> tuple[np.ndarray, np.ndarray]:
+    """95 % bootstrap intervals of S1 and ST (resampling the n rows of A, B and AB together), each (2, d)."""
+    n = len(fA)
+    S1, ST = zip(*(sobol(fA[k], fB[k], fAB[:, k]) for k in (rng.integers(0, n, n) for _ in range(rounds))))
+    return np.percentile(S1, [2.5, 97.5], axis=0), np.percentile(ST, [2.5, 97.5], axis=0)

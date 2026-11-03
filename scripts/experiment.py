@@ -8,6 +8,7 @@ collect the results.
     python scripts/experiment.py recost RESULT.json... --runs DIR [--tables DIR] [--era5 DIR --cmems DIR] [--on-time]
     python scripts/experiment.py backfill RESULT.json... --runs DIR --out DIR [--tables DIR]
     python scripts/experiment.py uncertainty JUDGED.json... --era5 DIR [--cmems DIR] [--tables DIR] --out result.csv
+    python scripts/experiment.py sobol result.npz --out result.csv
 
 deadlines: the routes with no hours yet get the shortest route's distance at 15 kn, rounded up to
 12 h (printed, to be written into the matrix before any run).
@@ -276,33 +277,58 @@ def cmd_uncertainty(args) -> None:
     saving = np.array([100 * (fuel[:, a] - fuel[:, b]) / fuel[:, a] for _, _, _, a, b, _, _ in voyages]).T  # (samples, voyages)
     nominal_check = max(max(abs(fuel[0, a] / 1000 / fs - 1), abs(fuel[0, b] / 1000 / fp - 1)) for _, _, _, a, b, fs, fp in voyages)
     print(f"nominal sample against the judged fuel: largest difference {100 * nominal_check:.3f}%")
-    n, d = args.n, len(u.PARAMETERS)
+    print(f"moves over MCR, taken at MCR's fuel rate: {int(over[1 : 1 + 2 * args.n].sum())} in {2 * args.n} samples"
+          f" ({over[1 : 1 + 2 * args.n].sum() / (2 * args.n * sum(len(t[0]) for t in tracks)):.2e} of moves)")
+    np.savez_compressed(os.path.splitext(args.out)[0] + ".npz", samples=samples, fuel=fuel, saving=saving, over=over,
+                        parameters=[p.name for p in u.PARAMETERS], voyages=[x[0] for x in voyages],
+                        routes=[x[1] for x in voyages], strategies=[x[2] for x in voyages], n=args.n)
+    summarise(saving, [(x[1], x[2]) for x in voyages], args.n, args.out, args.seed)
+
+
+def summarise(saving, groups_of, n: int, out: str, seed: int) -> None:
+    """Per route and strategy (and all): the nominal saving, its Monte Carlo spread and sign kept,
+    and Sobol indices with 95 % bootstrap intervals; printed and written to out (.csv). saving:
+    (samples, voyages), rows nominal, A (n), B (n), AB (d x n)."""
+    from shiprouting.fuel import uncertainty as u
+
+    d = len(u.PARAMETERS)
     mc = slice(1, 1 + 2 * n)  # A and B: independent samples
-    groups = {"all": np.ones(len(voyages), bool)}
-    for key in dict.fromkeys((r, st) for _, r, st, *_ in voyages):
-        groups[f"{key[0]} {key[1]}"] = np.array([(r, st) == key for _, r, st, *_ in voyages])
+    groups = {"all": np.ones(len(groups_of), bool)}
+    for key in dict.fromkeys(groups_of):
+        groups[f"{key[0]} {key[1]}"] = np.array([g == key for g in groups_of])
+    rng = np.random.default_rng(seed)
     rows = []
     for g, on in groups.items():
         y = saving[:, on].mean(axis=1)
-        S1, ST = u.sobol(y[1 : 1 + n], y[1 + n : 1 + 2 * n], y[1 + 2 * n :].reshape(d, n))
+        parts = (y[1 : 1 + n], y[1 + n : 1 + 2 * n], y[1 + 2 * n :].reshape(d, n))
+        S1, ST = u.sobol(*parts)
+        (S1_lo, S1_hi), (ST_lo, ST_hi) = u.sobol_interval(*parts, rng)
         sign = np.sign(y[0])
-        rows.append({"group": g, "voyages": int(on.sum()), "nominal_pct": round(float(y[0]), 3),
-                     "p5_pct": round(float(np.percentile(y[mc], 5)), 3), "p50_pct": round(float(np.percentile(y[mc], 50)), 3),
-                     "p95_pct": round(float(np.percentile(y[mc], 95)), 3), "sign_kept": round(float(np.mean(np.sign(y[mc]) == sign)), 4),
-                     "voyages_sign_kept_90": int((np.mean(np.sign(saving[mc][:, on]) == np.sign(saving[0, on]), axis=0) >= 0.9).sum())}
-                    | {f"S1_{p.name}": round(float(a), 3) for p, a in zip(u.PARAMETERS, S1)}
-                    | {f"ST_{p.name}": round(float(a), 3) for p, a in zip(u.PARAMETERS, ST)})  # fmt: skip
-        print({k: rows[-1][k] for k in ("group", "voyages", "nominal_pct", "p5_pct", "p50_pct", "p95_pct", "sign_kept", "voyages_sign_kept_90")},
-              flush=True)
-    print(f"moves over MCR, taken at MCR's fuel rate: {int(over[mc].sum())} in {2 * n} samples"
-          f" ({over[mc].sum() / (2 * n * sum(len(t[0]) for t in tracks)):.2e} of moves)")
-    with open(args.out, "w", newline="", encoding="utf-8") as f:
+        row = {"group": g, "voyages": int(on.sum()), "nominal_pct": round(float(y[0]), 3),
+               "p5_pct": round(float(np.percentile(y[mc], 5)), 3), "p50_pct": round(float(np.percentile(y[mc], 50)), 3),
+               "p95_pct": round(float(np.percentile(y[mc], 95)), 3), "sign_kept": round(float(np.mean(np.sign(y[mc]) == sign)), 4),
+               "voyages_sign_kept_90": int((np.mean(np.sign(saving[mc][:, on]) == np.sign(saving[0, on]), axis=0) >= 0.9).sum())}  # fmt: skip
+        print(row, flush=True)
+        for k, p in enumerate(u.PARAMETERS):
+            row |= {f"S1_{p.name}": round(float(S1[k]), 3), f"S1_{p.name}_ci": f"{S1_lo[k]:.3f}..{S1_hi[k]:.3f}",
+                    f"ST_{p.name}": round(float(ST[k]), 3), f"ST_{p.name}_ci": f"{ST_lo[k]:.3f}..{ST_hi[k]:.3f}"}
+            print(f"  {p.name}: S1 {S1[k]:.3f} ({S1_lo[k]:.3f}..{S1_hi[k]:.3f}), ST {ST[k]:.3f} ({ST_lo[k]:.3f}..{ST_hi[k]:.3f})")
+        rows.append(row)
+    with open(out, "w", newline="", encoding="utf-8") as f:
         w = csv.DictWriter(f, list(rows[0]))
         w.writeheader()
         w.writerows(rows)
-    np.savez_compressed(os.path.splitext(args.out)[0] + ".npz", samples=samples, fuel=fuel, saving=saving, over=over,
-                        parameters=[p.name for p in u.PARAMETERS], voyages=[x[0] for x in voyages])
-    print(f"{len(rows)} rows -> {args.out}")
+    print(f"{len(rows)} rows -> {out}")
+
+
+def cmd_sobol(args) -> None:
+    with np.load(args.npz) as f:
+        names = [str(v) for v in f["voyages"]]
+        groups_of = (list(zip(map(str, f["routes"]), map(str, f["strategies"]))) if "routes" in f
+                     else [route_strategy(name, {}) for name in names])
+        n = int(f["n"]) if "n" in f else (len(f["samples"]) - 1) // (len(f["parameters"]) + 2)
+        saving = f["saving"]
+    summarise(saving, groups_of, n, args.out, args.seed)
 
 
 def cmd_backfill(args) -> None:
@@ -378,6 +404,10 @@ def main() -> None:
     p.add_argument("--n", type=int, default=512, help="Saltelli base samples: n x (parameters + 2) ship models")
     p.add_argument("--seed", type=int, default=20261103)
     p.add_argument("--out", required=True, help=".csv of the results per route and strategy (and an .npz of every sample)")
+    p = sub.add_parser("sobol")
+    p.add_argument("npz", help="the .npz uncertainty wrote: summarise its samples again")
+    p.add_argument("--out", required=True)
+    p.add_argument("--seed", type=int, default=20261103)
     p = sub.add_parser("backfill")
     p.add_argument("results", nargs="+")
     p.add_argument("--runs", required=True)
@@ -389,7 +419,7 @@ def main() -> None:
             matrix = json.load(f)
         (cmd_deadlines if args.cmd == "deadlines" else cmd_run)(args, matrix)
     else:
-        {"table": cmd_table, "recost": cmd_recost, "backfill": cmd_backfill, "uncertainty": cmd_uncertainty}[args.cmd](args)
+        {"table": cmd_table, "recost": cmd_recost, "backfill": cmd_backfill, "uncertainty": cmd_uncertainty, "sobol": cmd_sobol}[args.cmd](args)
 
 
 if __name__ == "__main__":
