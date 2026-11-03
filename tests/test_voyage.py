@@ -55,6 +55,20 @@ def test_a_voyage_replanned_in_the_weather_forecast_sails_as_planned():
     assert once["sailed"]["fuel_t"] == pytest.approx(out["planned"]["least_fuel_t"], rel=1e-3)
 
 
+def test_a_voyage_across_open_sea_is_replanned_every_so_many_hours_from_where_it_is():
+    # The plans' points are moved off the cells (shortcut, relax): the voyage still stops on time and
+    # the next plan sets out from the point it stopped at, not from the nearest cell.
+    fc = steady(wind_u=-10.0, Hs=2.0, wave_from_x=1.0, T_m10=8.0, current_u=0.3)
+    goal, deadline = (4.5, 165.5), T0 + np.timedelta64(90 * 3600, "s")
+    out = voyage(GRAPH, KCS_SHIP, LAND, Same(fc), fc, START, goal, T0, deadline, speeds_kn=(12, 16, 20), every_hours=8.0)
+    log, sailed = out["sailed"]["log"], out["sailed"]
+    assert len(log) >= 8 and all(8.0 <= e["sailed_h"] <= 10.0 for e in log[:-1])
+    assert sum(e["sailed_km"] for e in log) == pytest.approx(sailed["km"], abs=0.5)  # no jumps between plans
+    points = {(round(a, 4), round(b, 4)) for a, b in zip(sailed["lat"], sailed["lon"])}
+    assert all(tuple(e["from"]) in points for e in log[1:])  # each plan set out from a point of the track
+    assert sailed["late_h"] == 0 and sailed["fuel_t"] == pytest.approx(out["planned"]["least_fuel_t"], rel=0.01)
+
+
 def test_a_saved_voyage_sailed_again_in_the_same_weather_burns_the_same():
     fc = steady(wind_u=-10.0, Hs=2.0, wave_from_x=1.0, T_m10=8.0, current_u=0.3)
     deadline = T0 + np.timedelta64(45 * 3600, "s")

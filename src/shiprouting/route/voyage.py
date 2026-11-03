@@ -70,8 +70,8 @@ def voyage(graph: Graph, ship: Ship, land, runs: Runs, came: Forecast, start, go
     departure, deadline = np.datetime64(departure, "s"), np.datetime64(deadline, "s")
     hours = float((deadline - departure) / HOUR)
     sea = Sea(ship, came, departure, tables)
-    cells = {(round(float(a), 6), round(float(b), 6)) for a, b in zip(graph.lat, graph.lon)}
     pos, ahead, at = tuple(start), list(via), 0.0
+    goal_cell = graph.nearest(*goal)
     sailed_track = {"lat": [], "lon": [], "on_link": [], "planned_kn": [], "segment_kn": [], "kg": [], "hours": []}
     log, first, late, prices = [], None, False, None
     while True:
@@ -81,7 +81,7 @@ def voyage(graph: Graph, ship: Ship, land, runs: Runs, came: Forecast, start, go
         target = deadline
         for _ in range(8):
             p = plan(graph, ship, forecast, pos, goal, now, target, speeds_kn, tables, max_tries, max_seconds, ahead, land=land, prices=prices,
-                     keep_shortest=math.isinf(every_hours))  # the shortest route's points are not graph cells, where a plan is cut to replan
+                     start_exact=bool(log))  # replanned from where the last plan was cut, not from its nearest cell
             if "least_fuel" in p:
                 break
             late = True
@@ -92,8 +92,8 @@ def voyage(graph: Graph, ship: Ship, land, runs: Runs, came: Forecast, start, go
         f = p["least_fuel"]
         lat, lon = np.array(f["lat"]), np.array(f["lon"])
         on_link, kn = np.array(f["on_link"], bool), np.array(f["segment_kn"])
-        stops = np.array([False] + [(round(lat[j], 6), round(lon[j], 6)) in cells and not on_link[j - 1] and not on_link[j]
-                                    for j in range(1, len(lat) - 1)] + [False])
+        stops = np.array([False] + [not on_link[j - 1] and not on_link[j] for j in range(1, len(lat) - 1)] + [False])
+        stops[stops] = [graph.nearest(a, b) != goal_cell for a, b in zip(lat[stops], lon[stops])]  # a plan needs two cells
         kg, h, sailed, end = sea.sail(lat, lon, on_link, kn, speeds_kn, at, at + every_hours, stops)
         seg_km = haversine_km(lat[:end], lon[:end], lat[1 : end + 1], lon[1 : end + 1])
         log.append({
