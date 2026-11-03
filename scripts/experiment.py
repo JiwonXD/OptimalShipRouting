@@ -122,7 +122,10 @@ def cmd_run(args, matrix) -> None:
         runs = Runs(args.runs or season["runs"], args.lag_hours)
         meta = {"commit": commit(), "season": args.season, "weather_plan": "ecmwf open data, newest run out",
                 "weather_came": "ecmwf open data, steps 0-21 h of each daily run", "lag_hours": args.lag_hours}
-    for departure in departures(season):
+    picked = [int(k) for k in args.departures.split(",")] if args.departures else None
+    for k, departure in enumerate(departures(season)):
+        if picked is not None and k not in picked:
+            continue
         for name, r in routes.items():
             deadline = departure + r["hours"] * HOUR
             came = None
@@ -346,6 +349,7 @@ def main() -> None:
     p.add_argument("land", help="land polygons shapefile")
     p.add_argument("--season", required=True)
     p.add_argument("--only", help="routes, comma-separated")
+    p.add_argument("--departures", help="which of the season's departures, comma-separated indices from 0 (to split a run over processes)")
     p.add_argument("--runs", help="forecast runs folder, if not the season's")
     p.add_argument("--tables", help="folder of wave added resistance tables")
     p.add_argument("--lag-hours", type=float, default=8.0)
