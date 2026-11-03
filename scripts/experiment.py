@@ -157,7 +157,7 @@ def cmd_run(args, matrix) -> None:
         meta = {"commit": commit(), "season": args.season, "weather_plan": "the weather that came, known in full (oracle)",
                 "weather_came": "era5" + (" + copernicus marine currents" if args.cmems else "")}
     else:
-        strategies = matrix["strategies"]
+        strategies = {k: v for k, v in matrix["strategies"].items() if not args.strategies or k in args.strategies.split(",")}
         runs = Runs(args.runs or season["runs"], args.lag_hours)
         meta = {"commit": commit(), "season": args.season, "weather_plan": "ecmwf open data, newest run out",
                 "weather_came": "ecmwf open data, steps 0-21 h of each daily run", "lag_hours": args.lag_hours}
@@ -421,6 +421,7 @@ def main() -> None:
     p.add_argument("land", help="land polygons shapefile")
     p.add_argument("--season", required=True)
     p.add_argument("--only", help="routes, comma-separated")
+    p.add_argument("--strategies", help="which of the matrix's strategies, comma-separated (default all)")
     p.add_argument("--departures", help="which of the season's departures, comma-separated indices from 0 (to split a run over processes)")
     p.add_argument("--runs", help="forecast runs folder, if not the season's")
     p.add_argument("--tables", help="folder of wave added resistance tables")
