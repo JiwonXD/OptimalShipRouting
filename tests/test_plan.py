@@ -189,3 +189,24 @@ def test_the_shortest_route_with_its_speeds_chosen_is_kept_when_the_way_found_is
 def test_the_hours_the_forecast_covers_are_given():
     out = plan(25.0)
     assert out["forecast_hours"] == pytest.approx(6.0)  # the test forecast runs 6 h past the departure
+
+
+def test_port_distances_are_compared_with_a_reference_table(tmp_path, monkeypatch, capsys):
+    import argparse
+    import csv
+    import sys
+    from pathlib import Path
+
+    sys.path.insert(0, str(Path(__file__).parents[1] / "scripts"))
+    import experiment
+
+    monkeypatch.setattr(experiment, "sea_graph", lambda args: (LAND, GRAPH))
+    matrix = {"ports": {"a": list(START), "b": list(GOAL), "c": [4.5, 165.5]}}
+    ref = tmp_path / "ref.csv"
+    km = float(haversine_km(*START, *GOAL))
+    ref.write_text(f"from,to,nm,via\na,b,{km / 1.852 * 1.02:.1f},open sea\n", encoding="utf-8")
+    out = tmp_path / "d.csv"
+    experiment.cmd_distances(argparse.Namespace(pairs=None, reference=str(ref), out=str(out), tables=None), matrix)
+    rows = list(csv.DictReader(out.open(encoding="utf-8")))
+    assert [(r["from"], r["to"]) for r in rows] == [("a", "b")]  # the reference's pairs
+    assert float(rows[0]["diff_pct"]) == pytest.approx(100 * (1 / 1.02 - 1), abs=0.3)

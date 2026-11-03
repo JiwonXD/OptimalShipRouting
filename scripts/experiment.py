@@ -4,6 +4,7 @@ collect the results.
     python scripts/experiment.py deadlines MATRIX LAND --runs DIR [sea options]
     python scripts/experiment.py run MATRIX OUT LAND --season summer [--only busan_la,...] [sea options] [--tables DIR]
         [--oracle ERA5_DIR --cmems DIR]
+    python scripts/experiment.py distances MATRIX LAND [--pairs a-b,...] [--reference pub151.csv] [--out distances.csv] [sea options]
     python scripts/experiment.py table OUT result.csv
     python scripts/experiment.py recost RESULT.json... --runs DIR [--tables DIR] [--era5 DIR --cmems DIR] [--on-time]
     python scripts/experiment.py backfill RESULT.json... --runs DIR --out DIR [--tables DIR]
@@ -105,6 +106,43 @@ def cmd_deadlines(args, matrix) -> None:
         km = p["shortest"]["km"]
         hours = math.ceil(km / 1.852 / DEADLINE_KN / 12) * 12
         print(f"{name}: shortest {km:,.1f} km -> {hours} h at {DEADLINE_KN:g} kn", flush=True)
+
+
+def cmd_distances(args, matrix) -> None:
+    """The shortest route between ports, against a published distance table (WP4: NGA Pub. 151, ±3 %)."""
+    from shiprouting.weather.forecast import Forecast
+
+    land, graph = sea_graph(args)
+    t = np.datetime64("2026-01-01T00", "s")
+    lat, lon = np.arange(-90.0, 90.5, 1.0), np.arange(0.0, 360.0, 1.0)
+    names = ("wind_u", "wind_v", "Hs", "wave_from_x", "wave_from_y", "T_m10", "current_u", "current_v")
+    still = Forecast(lat, lon, np.array([t, t + 3000 * HOUR]), {n: np.zeros((2, len(lat), len(lon))) for n in names})  # no weather
+    reference = {}
+    if args.reference:
+        with open(args.reference, encoding="utf-8") as f:
+            reference = {(r["from"], r["to"]): r for r in csv.DictReader(f)}
+    ports = matrix["ports"]
+    pairs = [tuple(p.split("-")) for p in args.pairs.split(",")] if args.pairs else list(reference) or [
+        (a, b) for i, a in enumerate(ports) for b in list(ports)[i + 1 :]]
+    rows = []
+    for a, b in pairs:
+        p = plan(graph, KCS_SHIP, still, ports[a], ports[b], t, t + 2000 * HOUR, tables=args.tables, land=land, least_fuel=False)
+        if "error" in p:
+            print(f"{a}-{b}: {p['error']}", flush=True)
+            continue
+        km = p["shortest"]["km"]
+        row = {"from": a, "to": b, "km": km, "nm": round(km / 1.852, 1), "moved_km": sum(p["moved_km"]),
+               "links": int(np.sum(p["shortest"]["on_link"]))}
+        if (ref := reference.get((a, b)) or reference.get((b, a))) is not None:
+            row |= {"reference_nm": float(ref["nm"]), "via": ref.get("via", ""),
+                    "diff_pct": round(100 * (km / 1.852 - float(ref["nm"])) / float(ref["nm"]), 2)}
+        print(row, flush=True)
+        rows.append(row)
+    if args.out and rows:
+        with open(args.out, "w", newline="", encoding="utf-8") as f:
+            w = csv.DictWriter(f, list(dict.fromkeys(k for r in rows for k in r)))
+            w.writeheader()
+            w.writerows(rows)
 
 
 def cmd_run(args, matrix) -> None:
@@ -369,6 +407,14 @@ def main() -> None:
     p.add_argument("land", help="land polygons shapefile")
     p.add_argument("--runs", required=True)
     add_sea_args(p)
+    p = sub.add_parser("distances")
+    p.add_argument("matrix")
+    p.add_argument("land", help="land polygons shapefile")
+    p.add_argument("--pairs", help="port pairs from the matrix, e.g. busan-la,rotterdam-newyork (default: the reference's, or all)")
+    p.add_argument("--reference", help="CSV of from,to,nm[,via]: published distances to compare with")
+    p.add_argument("--out", help=".csv of the distances")
+    p.add_argument("--tables", help="folder of wave added resistance tables")
+    add_sea_args(p)
     p = sub.add_parser("run")
     p.add_argument("matrix")
     p.add_argument("out", help="folder for the results")
@@ -414,10 +460,10 @@ def main() -> None:
     p.add_argument("--out", required=True)
     p.add_argument("--tables")
     args = parser.parse_args()
-    if args.cmd in ("deadlines", "run"):
+    if args.cmd in ("deadlines", "run", "distances"):
         with open(args.matrix, encoding="utf-8") as f:
             matrix = json.load(f)
-        (cmd_deadlines if args.cmd == "deadlines" else cmd_run)(args, matrix)
+        {"deadlines": cmd_deadlines, "run": cmd_run, "distances": cmd_distances}[args.cmd](args, matrix)
     else:
         {"table": cmd_table, "recost": cmd_recost, "backfill": cmd_backfill, "uncertainty": cmd_uncertainty, "sobol": cmd_sobol}[args.cmd](args)
 
