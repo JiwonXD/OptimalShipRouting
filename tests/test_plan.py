@@ -210,3 +210,21 @@ def test_port_distances_are_compared_with_a_reference_table(tmp_path, monkeypatc
     rows = list(csv.DictReader(out.open(encoding="utf-8")))
     assert [(r["from"], r["to"]) for r in rows] == [("a", "b")]  # the reference's pairs
     assert float(rows[0]["diff_pct"]) == pytest.approx(100 * (1 / 1.02 - 1), abs=0.3)
+
+
+def test_every_route_the_oracle_search_found_is_finished_and_the_kept_one_is_among_them():
+    import sys
+
+    sys.path.insert(0, "scripts")
+    from oracle_gap import every_route
+
+    fc = forecast(wind_u=-10.0, Hs=2.0, wave_from_x=1.0, T_m10=8.0)
+    lat, lon = np.arange(-90.0, 90.5, 1.0), np.arange(0.0, 360.0, 1.0)
+    storm = (np.abs(lat - 0.5) <= 2)[:, None] & ((lon >= 155) & (lon <= 160))[None, :]
+    for name, value in (("Hs", 7.0), ("wind_u", -30.0)):
+        fc.fields[name][:, storm] = value
+    out = every_route(GRAPH, LAND, fc, START, (0.5, 165.5), T0, T0 + np.timedelta64(60, "h"), speeds_kn=(12, 16, 20))
+    assert plan_module.meet_eta.__name__ == "meet_eta"  # put back
+    assert len(out["tries"]) >= 2 and any(t["found_in_time"] for t in out["tries"])
+    assert out["best_finished_t"] <= out["kept_t"] + 0.01
+    assert all(t["finished_h"] is None or t["finished_h"] <= 60 + 1e-6 for t in out["tries"])
