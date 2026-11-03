@@ -175,6 +175,17 @@ def test_the_shortest_route_is_kept_when_the_search_finds_nothing_better(monkeyp
     assert len(best["legs"]) == 2 and sum(leg["hours"] for leg in best["legs"]) == pytest.approx(short["hours"], abs=0.2)
 
 
+def test_the_shortest_route_with_its_speeds_chosen_is_kept_when_the_way_found_is_longer(monkeypatch):
+    monkeypatch.setattr(plan_module.SpeedChoice, "shortcut", lambda self, land, f, keep: f)  # the way found keeps its grid steps
+    monkeypatch.setattr(plan_module.SpeedChoice, "relax", lambda self, land, f, keep, *a, **kw: f)
+    fc = forecast(wind_u=-10.0, Hs=2.0, wave_from_x=1.0, T_m10=8.0)
+    fc.fields["wind_u"][1] = 10.0
+    out = plan_module.plan(GRAPH, KCS_SHIP, fc, (0.5, 150.5), (4.5, 165.5), T0, T0 + np.timedelta64(60, "h"), (12, 16, 20), land=LAND)
+    short, best = out["shortest"], out["least_fuel"]
+    assert best["is_shortest"] and best["lat"] == short["lat"] and best["hours"] <= 60.0 + 0.05
+    assert best["fuel_t"] < short["fuel_t"]  # the speeds chosen again, not the one speed the shortest route sails at
+
+
 def test_the_hours_the_forecast_covers_are_given():
     out = plan(25.0)
     assert out["forecast_hours"] == pytest.approx(6.0)  # the test forecast runs 6 h past the departure

@@ -158,17 +158,26 @@ def plan(graph: Graph, ship: Ship, forecast: Forecast, start, goal, departure, d
         out["error"] = "속력을 골라 가는 경로 중 도착 기한 안에 닿는 것을 찾지 못했어요."
         return out
     out["prices"] = [min((t["per_hour"] for t in tries if t["in_time"]), default=None) for tries in out["tries"]]  # the lowest that arrived in time
+    met = [p for p in out["prices"] if p is not None]
+    price = float(np.mean(met)) if met else 0.0
     if land is not None:
         f = choice.shortcut(land, f, waypoints(f))
         f = choice.snap_up(smoothed(choice.relax(land, f, waypoints(f))))
-        met = [p for p in out["prices"] if p is not None]
         try:
-            f = choice.retime(f, hours, per_hour=float(np.mean(met)) if met else 0.0)
+            f = choice.retime(f, hours, per_hour=price)
         except ValueError:  # no speeds on this way arrive in time as the buckets see it
             f = choice.fill_slack(f, hours)
+    on_shortest = False
+    if keep_shortest:  # the shortest route with its speeds chosen too may beat the way found (open sea, mild weather)
+        try:
+            g = choice.retime(dataclasses.replace(r, clock=clock, cost=fuel), hours, per_hour=price)
+        except ValueError:
+            g = None
+        if g is not None and g.cost < f.cost:
+            f, on_shortest = g, True
     out["least_fuel"] = describe(f, f.cost, choice.speeds_kn(f), float(f.clock[-1] - f.clock[0]), time.perf_counter() - t0)
-    out["least_fuel"]["is_shortest"] = bool(keep_shortest and f.cost > fuel)
-    if out["least_fuel"]["is_shortest"]:  # the way and speeds found burn more than the shortest route as it sails, also in time: keep that
+    out["least_fuel"]["is_shortest"] = bool(on_shortest or (keep_shortest and f.cost > fuel))
+    if keep_shortest and f.cost > fuel:  # the way and speeds found burn more than the shortest route as it sails, also in time: keep that
         out["least_fuel"] = {**out["shortest"], "seconds": out["least_fuel"]["seconds"], "is_shortest": True}
         f = dataclasses.replace(r, clock=clock)
     ends = [0, *waypoints(f), len(f.lat) - 1]
