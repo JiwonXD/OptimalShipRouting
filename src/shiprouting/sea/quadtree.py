@@ -260,10 +260,9 @@ def any_angle(
     the corners afterwards (straighten) cannot change the way. Links are taken as astar takes
     them, and no arc skips one. The clock is the km sailed.
 
-    Most arcs cross open ocean, so before land is looked up (arcs_on_land) an arc is sampled
-    every 10 km or less: a step between two samples whose root cells and their eight
-    neighbours are all whole cells of water (and deep, with shallow water as land), and which
-    moves no more than a cell, misses land. Only the other steps are looked up.
+    Most arcs cross open ocean, so arcs_on_land skips the land lookup for its pieces that run
+    only through root cells whose eight neighbours, like themselves, are whole cells of water
+    (and deep, with shallow water as land); an arc is judged as arcs_on_land judges it.
 
     The distance still to go is guessed from the steps between cells: their shortest distance
     to g (one Dijkstra from g, links included) over `steps_over`, how much longer the steps are
@@ -368,35 +367,22 @@ class OpenWater:
     root: float
 
     def clear(self, land: Land, lat0: float, lon0: float, lat1: float, lon1: float) -> bool:
-        """Whether the great-circle arc misses land (as arcs_on_land, in steps of 10 km or less)."""
-        lat, lon, look = _open_steps(self.safe, self.lat0, self.root, float(lat0), float(lon0), float(lat1), float(lon1))
-        if not look.any():
-            return True
-        # Each step as a straight lon/lat line, as arcs_on_land tests its pieces; a step across
-        # ±180° is left to arcs_on_land.
-        k = np.nonzero(look)[0]
-        end = lon[k] + (lon[k + 1] - lon[k] + 180) % 360 - 180
-        past = np.abs(end) > 180
-        here = k[~past]
-        lines = shapely.linestrings(np.stack([np.column_stack([lon[here], lat[here]]), np.column_stack([lon[here + 1], lat[here + 1]])], axis=1))
-        if land.crosses(lines).any():
-            return False
-        k = k[past]
-        return not (len(k) and arcs_on_land(land, lat[k], lon[k], lat[k + 1], lon[k + 1]).any())
+        """Whether the great-circle arc misses land, as arcs_on_land judges it (same pieces)."""
+        n = max(1, math.ceil(float(haversine_km(lat0, lon0, lat1, lon1)) / 20.0))
+        lat, lon = _along_n(float(lat0), float(lon0), float(lat1), float(lon1), n)
+        look = ~_open_pieces(self.safe, self.lat0, self.root, lat[:-1], lon[:-1], lat[1:], lon[1:])
+        return not (look.any() and _pieces_on_land(land, lat[:-1], lon[:-1], lat[1:], lon[1:], look).any())
 
 
 @numba.njit(cache=True)
-def _open_steps(safe, lat_south, root, lat0, lon0, lat1, lon1):
-    """Points every 10 km or less along the arc, and which steps between them are not known to miss land."""
+def _along_n(lat0, lon0, lat1, lon1, n):
+    """along() at the fractions 0, 1/n, ..., 1, for one arc."""
     d = math.pi / 180
-    x0, y0, z0 = math.cos(lat0 * d) * math.cos(lon0 * d), math.cos(lat0 * d) * math.sin(lon0 * d), math.sin(lat0 * d)
-    x1, y1, z1 = math.cos(lat1 * d) * math.cos(lon1 * d), math.cos(lat1 * d) * math.sin(lon1 * d), math.sin(lat1 * d)
+    p0, l0, p1, l1 = lat0 * d, lon0 * d, lat1 * d, lon1 * d
+    x0, y0, z0 = math.cos(p0) * math.cos(l0), math.cos(p0) * math.sin(l0), math.sin(p0)
+    x1, y1, z1 = math.cos(p1) * math.cos(l1), math.cos(p1) * math.sin(l1), math.sin(p1)
     omega = math.acos(min(1.0, max(-1.0, x0 * x1 + y0 * y1 + z0 * z1)))
-    dlon = abs((lon1 - lon0 + 180) % 360 - 180)
-    n = max(1, math.ceil(omega * 6371.0088 / 10), math.ceil(dlon / (0.5 * root)))
     lat, lon = np.empty(n + 1), np.empty(n + 1)
-    ok = np.empty(n + 1, np.bool_)
-    rows, cols = safe.shape
     for k in range(n + 1):
         f = k / n
         if omega > 1e-12:
@@ -405,14 +391,27 @@ def _open_steps(safe, lat_south, root, lat0, lon0, lat1, lon1):
             w0, w1 = 1 - f, f
         x, y, z = w0 * x0 + w1 * x1, w0 * y0 + w1 * y1, w0 * z0 + w1 * z1
         lat[k], lon[k] = math.atan2(z, math.hypot(x, y)) / d, math.atan2(y, x) / d
-        i, j = math.floor((lat[k] - lat_south) / root), math.floor((lon[k] + 180) / root) % cols
-        ok[k] = 0 <= i < rows and safe[i, j]
-    lat[0], lon[0], lat[n], lon[n] = lat0, lon0, lat1, lon1
-    look = np.empty(n, np.bool_)
-    for k in range(n):
-        small = abs(lat[k + 1] - lat[k]) <= root and abs((lon[k + 1] - lon[k] + 180) % 360 - 180) <= root
-        look[k] = not (ok[k] and ok[k + 1] and small)
-    return lat, lon, look
+    return lat, lon
+
+
+@numba.njit(cache=True)
+def _open_pieces(safe, lat_south, root, a_lat, a_lon, b_lat, b_lon):
+    """Whether each straight lon/lat piece is known to miss land: points along it no more than
+    half a root cell apart all lie in safe cells, so the piece stays within their neighbours."""
+    rows, cols = safe.shape
+    out = np.empty(len(a_lat), np.bool_)
+    for p in range(len(a_lat)):
+        d_lat, d_lon = b_lat[p] - a_lat[p], b_lon[p] - a_lon[p]
+        m = max(1, math.ceil(max(abs(d_lat), abs(d_lon)) / (0.5 * root)))
+        ok = True
+        for k in range(m + 1):
+            i = math.floor((a_lat[p] + k / m * d_lat - lat_south) / root)
+            j = math.floor((a_lon[p] + k / m * d_lon + 180) / root) % cols
+            if not (0 <= i < rows and safe[i, j]):
+                ok = False
+                break
+        out[p] = ok
+    return out
 
 
 def open_water(graph: Graph, land=None) -> OpenWater:
@@ -581,31 +580,47 @@ def cut_corners(land: Land, lat, lon, fixed, seg_link, clock, sharp: float = 60.
             clock = np.r_[clock[:k], ca, cb, clock[k + 1:]]
     return lat, lon, seg_link, clock
 
-def arcs_on_land(land: Land, lat0, lon0, lat1, lon1, piece_km: float = 20.0, clearance_km: float = 0.0) -> np.ndarray:
+def arcs_on_land(
+    land: Land, lat0, lon0, lat1, lon1, piece_km: float = 20.0, clearance_km: float = 0.0, open_sea: OpenWater | None = None
+) -> np.ndarray:
     """Whether each great-circle arc from (lat0, lon0) to (lat1, lon1) comes within clearance_km of land.
 
     An arc is cut into pieces of at most piece_km, each tested as a straight lon/lat line;
     over 20 km the two differ by metres. The clearance is turned into degrees with the
     longitude scale at the piece, so it is at least clearance_km in every direction.
+    Given open_sea (and no clearance), pieces it shows to miss land are not looked up.
     """
     lat0, lon0, lat1, lon1 = np.broadcast_arrays(*(np.atleast_1d(np.asarray(v, float)) for v in (lat0, lon0, lat1, lon1)))
     n = np.maximum(1, np.ceil(haversine_km(lat0, lon0, lat1, lon1) / piece_km)).astype(int)
     arc = np.repeat(np.arange(len(n)), n)
-    k = np.arange(len(arc)) - np.repeat(np.cumsum(n) - n, n)
-    a_lat, a_lon = along(lat0[arc], lon0[arc], lat1[arc], lon1[arc], k / n[arc])
-    b_lat, b_lon = along(lat0[arc], lon0[arc], lat1[arc], lon1[arc], (k + 1) / n[arc])
+    on = np.repeat(np.arange(len(n)), n + 1)  # the n + 1 ends of each arc's pieces
+    k = np.arange(len(on)) - np.repeat(np.cumsum(n + 1) - (n + 1), n + 1)
+    p_lat, p_lon = along(lat0[on], lon0[on], lat1[on], lon1[on], k / n[on])
+    a_lat, a_lon, b_lat, b_lon = p_lat[k < n[on]], p_lon[k < n[on]], p_lat[k > 0], p_lon[k > 0]
+    look = None
+    if open_sea is not None and clearance_km <= 0:
+        look = ~_open_pieces(open_sea.safe, open_sea.lat0, open_sea.root, a_lat, a_lon, b_lat, b_lon)
+    hit = _pieces_on_land(land, a_lat, a_lon, b_lat, b_lon, look, clearance_km)
+    return np.bincount(arc, weights=hit, minlength=len(n)) > 0
+
+
+def _pieces_on_land(land: Land, a_lat, a_lon, b_lat, b_lon, look=None, clearance_km: float = 0.0) -> np.ndarray:
+    """Whether each straight lon/lat piece comes within clearance_km of land; only those in look are looked up."""
     b_lon = a_lon + (b_lon - a_lon + 180) % 360 - 180  # a piece crossing ±180° runs past it
-    a, b = np.column_stack([a_lon, a_lat]), np.column_stack([b_lon, b_lat])
-    deg = clearance_km / (111.32 * np.cos(np.radians((a_lat + b_lat) / 2)))
+    look = np.ones(len(a_lat), bool) if look is None else look
+    a, b = np.column_stack([a_lon, a_lat])[look], np.column_stack([b_lon, b_lat])[look]
+    deg = clearance_km / (111.32 * np.cos(np.radians((a_lat[look] + b_lat[look]) / 2)))
 
     def touches(lines, k):
         return land.crosses(lines) if clearance_km <= 0 else land.near(lines, deg[k])
 
     hit = touches(shapely.linestrings(np.stack([a, b], axis=1)), slice(None))
-    for shift, past in ((360.0, b_lon < -180), (-360.0, b_lon > 180)):
+    for shift, past in ((360.0, b[:, 0] < -180), (-360.0, b[:, 0] > 180)):
         if past.any():
             hit[past] |= touches(shapely.linestrings(np.stack([a[past] + [shift, 0], b[past] + [shift, 0]], axis=1)), past)
-    return np.bincount(arc, weights=hit, minlength=len(n)) > 0
+    out = np.zeros(len(a_lat), bool)
+    out[look] = hit
+    return out
 
 
 def along(lat0, lon0, lat1, lon1, f):

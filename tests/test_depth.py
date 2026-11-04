@@ -176,5 +176,5 @@ def test_arcs_over_a_bank_are_not_cleared_as_open_water(gebco):
     sea = open_water(graph, obstacles)
     for lat in (0.5, 0.375, 0.875):
         clear = sea.clear(obstacles, lat, -3.0, lat, 4.0)
-        assert clear == (not arcs_on_land(obstacles, lat, -3.0, lat, 4.0, piece_km=5.0)[0])
+        assert clear == (not arcs_on_land(obstacles, lat, -3.0, lat, 4.0)[0])
     assert not sea.clear(obstacles, 0.5, -3.0, 0.5, 4.0)

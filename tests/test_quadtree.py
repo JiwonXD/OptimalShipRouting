@@ -193,7 +193,7 @@ def test_arcs_over_open_water_are_cleared_without_looking_up_land_and_agree_with
     q = np.r_[rng.integers(0, len(g.lat), 300), [rng.choice(near[np.abs(g.lat[near] - g.lat[i]) + np.abs(g.lon[near] - g.lon[i]) < 3]) for i in p[300:]]]
     clear = np.array([sea.clear(land, g.lat[i], g.lon[i], g.lat[j], g.lon[j]) for i, j in zip(p, q)])
     assert 0.1 < clear.mean() < 0.9
-    assert np.array_equal(clear, ~arcs_on_land(land, g.lat[p], g.lon[p], g.lat[q], g.lon[q], piece_km=5.0))
+    assert np.array_equal(clear, ~arcs_on_land(land, g.lat[p], g.lon[p], g.lat[q], g.lon[q]))
 
 
 def test_the_search_along_arcs_takes_links_whole_and_crosses_the_dateline():
