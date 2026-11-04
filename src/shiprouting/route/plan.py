@@ -17,7 +17,10 @@ and moves its points sideways off the grid's eight directions where that is chea
 (SpeedChoice.relax).
 Both routes then have their sharp turns smoothed out (quadtree.smooth_turns), waypoints
 kept, and the least-fuel route's speeds are chosen again on its final way, the least fuel
-that arrives by the deadline (SpeedChoice.retime).
+that arrives by the deadline (SpeedChoice.retime). With no waypoints, every way the price
+search found on its way to the deadline, in time or late, is finished so too, and the
+cheapest that arrives by the deadline is kept: finished, the fuel follows the way more than
+the price it was found at.
 
 With currents, the surface current changes each move's speed over the ground (FuelCost),
 so the shortest route's one speed through the water is adjusted until it arrives at the
@@ -157,9 +160,10 @@ def plan(graph: Graph, ship: Ship, forecast: Forecast, start, goal, departure, d
     offered = sorted({*speeds_kn, kn})
     choice = SpeedChoice([cost(k) for k in offered])
     prices = list(prices or [])
+    ways = [] if land is not None and len(nodes) == 2 else None  # every way the price search finds, each finished below
     if legs == "shared":
         f, tries = meet_eta(graph, nodes[0], nodes[-1], choice, hours, max_tries=max_tries, max_seconds=max_seconds,
-                            via=nodes[1:-1], price=(prices or [None])[0])
+                            via=nodes[1:-1], price=(prices or [None])[0], found=ways)
         out["tries"] = [tries]
     else:
         found, out["tries"], at = [], [], departure
@@ -169,7 +173,7 @@ def plan(graph: Graph, ship: Ship, forecast: Forecast, start, goal, departure, d
                 out["tries"].append([])
                 continue
             f, tries = meet_eta(graph, a, b, SpeedChoice([cost(k, at) for k in offered]), hours * leg.km / sum(r.km for r in shortest),
-                                max_tries=max_tries, max_seconds=max_seconds, price=prices[i] if i < len(prices) else None)
+                                max_tries=max_tries, max_seconds=max_seconds, price=prices[i] if i < len(prices) else None, found=ways)
             out["tries"].append(tries)
             if f is None:
                 break
@@ -179,22 +183,44 @@ def plan(graph: Graph, ship: Ship, forecast: Forecast, start, goal, departure, d
     if f is None:
         out["error"] = "속력을 골라 가는 경로 중 도착 기한 안에 닿는 것을 찾지 못했어요."
         return out
-    if exact:  # the first segment at the speed the path set out at
-        k = choice.speed_index(f)
-        k = np.r_[k[0], k]
-        g = lead_in(f)
-        f_clock, f_kg, _ = choice.sail(dataclasses.replace(g, clock=np.r_[f.clock[0], g.clock[1:]]), k)
-        f = dataclasses.replace(g, clock=f_clock, cost=float(f_kg[k, np.arange(len(k))].sum()))
     out["prices"] = [min((t["per_hour"] for t in tries if t["in_time"]), default=None) for tries in out["tries"]]  # the lowest that arrived in time
     met = [p for p in out["prices"] if p is not None]
     price = float(np.mean(met)) if met else 0.0
-    if land is not None:
-        f = choice.shortcut(land, f, waypoints(f))
-        f = choice.snap_up(smoothed(choice.relax(land, f, waypoints(f))))
-        try:
-            f = choice.retime(f, hours, per_hour=price)
-        except ValueError:  # no speeds on this way arrive in time as the buckets see it
-            f = choice.fill_slack(f, hours)
+
+    def finish(f, slack=True):
+        """A way found, from the start point (start_exact), its corners cut, relaxed and smoothed, and its speeds chosen
+        again for the deadline. None if it cannot arrive in time and not slack (else its slack is filled the old way)."""
+        if exact:  # the first segment at the speed the path set out at
+            k = choice.speed_index(f)
+            k = np.r_[k[0], k]
+            g = lead_in(f)
+            f_clock, f_kg, _ = choice.sail(dataclasses.replace(g, clock=np.r_[f.clock[0], g.clock[1:]]), k)
+            f = dataclasses.replace(g, clock=f_clock, cost=float(f_kg[k, np.arange(len(k))].sum()))
+        if land is not None:
+            f = choice.shortcut(land, f, waypoints(f))
+            f = choice.snap_up(smoothed(choice.relax(land, f, waypoints(f))))
+            try:
+                f = choice.retime(f, hours, per_hour=price)
+            except ValueError as e:  # no speeds on this way arrive in time as the buckets see it
+                if not slack:
+                    return None
+                f = choice.fill_slack(f, hours)
+        return f
+
+    kept, f = f, finish(f)
+    if ways is not None:  # finished, a way searched at another price, even one that arrived late, may burn less: keep the cheapest
+        # The same cells at other speeds count as another way: shortcut and relax judge each move at its speed.
+        out["ways_t"], seen = [], [(kept.lat, kept.lon, choice.speed_index(kept))]
+        for w in ways:
+            k = choice.speed_index(w)
+            if any(np.array_equal(w.lat, a) and np.array_equal(w.lon, b) and np.array_equal(k, c) for a, b, c in seen):
+                out["ways_t"].append(None)
+                continue
+            seen.append((w.lat, w.lon, k))
+            g = finish(w, slack=False)
+            out["ways_t"].append(None if g is None else round(g.cost / 1000, 2))
+            if g is not None and g.cost < f.cost:
+                f = g
     on_shortest = False
     if keep_shortest:  # the shortest route with its speeds chosen too may beat the way found (open sea, mild weather)
         try:

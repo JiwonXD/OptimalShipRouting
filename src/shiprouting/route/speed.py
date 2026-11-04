@@ -318,7 +318,8 @@ class SpeedChoice:
 
 
 def meet_eta(graph: Graph, s: int, g: int, choice: SpeedChoice, eta_hours: float, tolerance: float = 0.002,
-             max_tries: int = 12, max_seconds: float = math.inf, via=(), price: float | None = None) -> tuple[SearchResult | None, list[dict]]:
+             max_tries: int = 12, max_seconds: float = math.inf, via=(), price: float | None = None,
+             found: list | None = None) -> tuple[SearchResult | None, list[dict]]:
     """The least-fuel route found arriving within eta_hours, narrowing down the price of an hour.
 
     Through the nodes via in order, the legs are searched one after another at the same
@@ -332,7 +333,8 @@ def meet_eta(graph: Graph, s: int, g: int, choice: SpeedChoice, eta_hours: float
     Stops when a route arrives within a fraction `tolerance` of the voyage before the ETA, or after max_tries
     searches. The best route that arrived in time then spends the time it has left
     (SpeedChoice.fill_slack). Returns that route (None if none arrived in time) and a log
-    of the tries.
+    of the tries. Given a list `found`, every route searched, in time or late, is appended to
+    it as found (its cost the fuel alone).
     """
     tries, best, hours = [], None, {}
 
@@ -345,6 +347,8 @@ def meet_eta(graph: Graph, s: int, g: int, choice: SpeedChoice, eta_hours: float
         r = join_legs(legs)
         fuel = r.cost - per_hour * float(r.clock[-1])
         hours[per_hour] = float(r.clock[-1])
+        if found is not None:
+            found.append(dataclasses.replace(r, cost=fuel))
         tries.append({"per_hour": round(per_hour, 1), "hours": round(float(r.clock[-1]), 1), "fuel_t": round(fuel / 1000, 2),
                       "seconds": round(r.seconds, 1), "in_time": bool(in_time(r))})
         print(f"  price {per_hour:8.1f} kg/h: {r.clock[-1]:7.1f} h, {fuel / 1000:8.2f} t, {r.seconds:5.1f} s", flush=True)

@@ -158,7 +158,8 @@ def test_the_least_fuel_route_keeps_going_round_a_storm():
     out = plan_module.plan(GRAPH, KCS_SHIP, fc, START, (0.5, 165.5), T0, T0 + np.timedelta64(60, "h"), (12, 16, 20), land=LAND)
     r = out["least_fuel"]
     lat, lon = np.array(r["lat"]), np.array(r["lon"])
-    assert not ((np.abs(lat - 0.5) < 2.5) & (lon > 155) & (lon < 160)).any()  # round it, not through
+    # round it, not through: outside the storm's cells (the weather fades out to the next row, 1° on, which a way may skirt)
+    assert not ((np.abs(lat - 0.5) <= 2) & (lon > 155) & (lon < 160)).any()
     assert r["fuel_t"] < out["shortest"]["fuel_t"]
 
 
@@ -212,7 +213,7 @@ def test_port_distances_are_compared_with_a_reference_table(tmp_path, monkeypatc
     assert float(rows[0]["diff_pct"]) == pytest.approx(100 * (1 / 1.02 - 1), abs=0.3)
 
 
-def test_every_route_the_oracle_search_found_is_finished_and_the_kept_one_is_among_them():
+def test_the_plan_keeps_the_cheapest_of_every_way_the_price_search_found_once_finished():
     import sys
 
     sys.path.insert(0, "scripts")
@@ -226,5 +227,5 @@ def test_every_route_the_oracle_search_found_is_finished_and_the_kept_one_is_amo
     out = every_route(GRAPH, LAND, fc, START, (0.5, 165.5), T0, T0 + np.timedelta64(60, "h"), speeds_kn=(12, 16, 20))
     assert plan_module.meet_eta.__name__ == "meet_eta"  # put back
     assert len(out["tries"]) >= 2 and any(t["found_in_time"] for t in out["tries"])
-    assert out["best_finished_t"] <= out["kept_t"] + 0.01
+    assert out["best_finished_t"] == pytest.approx(out["kept_t"], abs=0.01)  # the plan finished them all too, and kept the best
     assert all(t["finished_h"] is None or t["finished_h"] <= 60 + 1e-6 for t in out["tries"])

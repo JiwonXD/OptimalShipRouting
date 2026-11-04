@@ -121,6 +121,8 @@ def every_route(
         "deadline": str(deadline),
         "shortest_t": p["shortest"]["fuel_t"],
         "kept_t": p["least_fuel"]["fuel_t"],
+        "plan_seconds": p["least_fuel"]["seconds"],
+        "ways_t": p.get("ways_t"),
         "is_shortest": p["least_fuel"].get("is_shortest"),
         "price": price,
         "best_finished_t": best,
