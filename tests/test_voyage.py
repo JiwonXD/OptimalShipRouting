@@ -140,3 +140,14 @@ def test_a_track_judged_on_time_burns_the_same_on_its_resistance_parts():
     tables = uncertainty.rate_tables(KCS_SHIP, [kn * KNOT for kn in SPEEDS_KN])
     fuel, over = uncertainty.track_fuel(k, air, wave, h, tables, 1.0, 1.0)
     assert fuel / 1000 == pytest.approx(judged["fuel_t"], abs=0.006) and over == 0
+
+
+def test_no_replan_falls_within_the_last_hours_before_the_deadline():
+    # Sailing slips from the plan a little; a replan an hour out has no time left to make that up.
+    fc = steady(wind_u=-10.0, Hs=2.0, wave_from_x=1.0, T_m10=8.0, current_u=0.3)
+    goal, deadline = (4.5, 165.5), T0 + np.timedelta64(76 * 3600, "s")  # every 8.5 h or so, the 9th plan would be 8 h out
+    out = voyage(GRAPH, KCS_SHIP, LAND, Same(fc), fc, START, goal, T0, deadline, speeds_kn=(12, 16, 20), every_hours=8.0, last_hours=12.0)
+    log = out["sailed"]["log"]
+    last = sum(e["sailed_h"] for e in log[:-1])
+    assert len(log) >= 6 and 76.0 - last >= 12.0 - 0.1
+    assert out["sailed"]["late_h"] == 0

@@ -229,3 +229,15 @@ def test_the_plan_keeps_the_cheapest_of_every_way_the_price_search_found_once_fi
     assert len(out["tries"]) >= 2 and any(t["found_in_time"] for t in out["tries"])
     assert out["best_finished_t"] == pytest.approx(out["kept_t"], abs=0.01)  # the plan finished them all too, and kept the best
     assert all(t["finished_h"] is None or t["finished_h"] <= 60 + 1e-6 for t in out["tries"])
+
+
+def test_a_plan_arrives_in_time_when_only_the_finished_ways_do(monkeypatch):
+    # Off a coarse cell near port the way on the cells detours: none of the searched ways arrives in time
+    # on the cells, but finished (corners cut) one does.
+    meet_eta = plan_module.meet_eta
+    monkeypatch.setattr(plan_module, "meet_eta", lambda graph, s, g, choice, eta, **kw: meet_eta(graph, s, g, choice, eta * 0.5, **kw))
+    fc = forecast(wind_u=-10.0, Hs=2.0, wave_from_x=1.0, T_m10=8.0)
+    out = plan_module.plan(GRAPH, KCS_SHIP, fc, START, (0.5, 165.5), T0, T0 + np.timedelta64(60, "h"), (12, 16, 20), land=LAND)
+    assert all(not t["in_time"] for t in out["tries"][0])
+    assert "least_fuel" in out and out["least_fuel"]["hours"] <= 60.0 + 1e-6
+    assert out["least_fuel"]["fuel_t"] <= out["shortest"]["fuel_t"]

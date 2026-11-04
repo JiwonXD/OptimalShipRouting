@@ -64,9 +64,15 @@ class Runs:
 
 def voyage(graph: Graph, ship: Ship, land, runs: Runs, came: Forecast, start, goal, departure, deadline, via=(),
            speeds_kn=SPEEDS_KN, tables: str | None = None, every_hours: float = 24.0, max_tries: int = 12,
-           max_seconds: float = math.inf) -> dict:
+           max_seconds: float = math.inf, last_hours: float = 6.0) -> dict:
     """The least-fuel voyage replanned every every_hours (math.inf: planned once), sailed in the
-    weather that came; and the first plan's shortest route sailed there too."""
+    weather that came; and the first plan's shortest route sailed there too.
+
+    A replan that would fall within last_hours of the deadline is brought forward to last_hours
+    before it (or left out, if the last one was hardly earlier): sailing in the weather that came
+    slips from the plan by a few percent a day, and an hour or so out there is no time left to make
+    it up. A plan that cannot arrive by the deadline pushes it back a little at a time, from 0.1 h
+    or 5 % of the time left, doubling."""
     departure, deadline = np.datetime64(departure, "s"), np.datetime64(deadline, "s")
     hours = float((deadline - departure) / HOUR)
     sea = Sea(ship, came, departure, tables)
@@ -79,13 +85,13 @@ def voyage(graph: Graph, ship: Ship, land, runs: Runs, came: Forecast, start, go
         run, forecast = runs.newest(now)
         t0 = time.perf_counter()
         target = deadline
-        for _ in range(8):
+        for attempt in range(8):
             p = plan(graph, ship, forecast, pos, goal, now, target, speeds_kn, tables, max_tries, max_seconds, ahead, land=land, prices=prices,
                      start_exact=bool(log))  # replanned from where the last plan was cut, not from its nearest cell
             if "least_fuel" in p:
                 break
             late = True
-            target = target + max(0.05 * float((target - now) / HOUR), 1.0) * HOUR
+            target = target + max(0.05 * float((target - now) / HOUR), 0.1 * 2**attempt) * HOUR
         else:
             raise RuntimeError(f"no plan from {pos} at {now}: {p.get('error')}")
         first = first or p
@@ -94,7 +100,10 @@ def voyage(graph: Graph, ship: Ship, land, runs: Runs, came: Forecast, start, go
         on_link, kn = np.array(f["on_link"], bool), np.array(f["segment_kn"])
         stops = np.array([False] + [not on_link[j - 1] and not on_link[j] for j in range(1, len(lat) - 1)] + [False])
         stops[stops] = [graph.nearest(a, b) != goal_cell for a, b in zip(lat[stops], lon[stops])]  # a plan needs two cells
-        kg, h, sailed, end = sea.sail(lat, lon, on_link, kn, speeds_kn, at, at + every_hours, stops)
+        until = at + every_hours
+        if math.isfinite(until) and until > hours - last_hours:  # too close to the deadline to make up a slip from there
+            until = hours - last_hours if hours - last_hours >= at + last_hours else math.inf
+        kg, h, sailed, end = sea.sail(lat, lon, on_link, kn, speeds_kn, at, until, stops)
         seg_km = haversine_km(lat[:end], lon[:end], lat[1 : end + 1], lon[1 : end + 1])
         log.append({
             "time": str(now), "run": str(run), "from": [round(float(v), 4) for v in pos], "deadline": str(target),

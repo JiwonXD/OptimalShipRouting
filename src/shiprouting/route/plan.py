@@ -180,12 +180,13 @@ def plan(graph: Graph, ship: Ship, forecast: Forecast, start, goal, departure, d
             found.append(f)
             at = at + np.timedelta64(int(round(f.clock[-1] * 3600)), "s")
         f = join_legs(found) if f is not None else None
-    if f is None:
+    if f is None and not ways:
         out["error"] = "속력을 골라 가는 경로 중 도착 기한 안에 닿는 것을 찾지 못했어요."
         return out
     out["prices"] = [min((t["per_hour"] for t in tries if t["in_time"]), default=None) for tries in out["tries"]]  # the lowest that arrived in time
     met = [p for p in out["prices"] if p is not None]
-    price = float(np.mean(met)) if met else 0.0
+    # None arrived in time on the cells (finished, one may still): the highest price tried, time being short
+    price = float(np.mean(met)) if met else max(t["per_hour"] for tries in out["tries"] for t in tries)
 
     def finish(f, slack=True):
         """A way found, from the start point (start_exact), its corners cut, relaxed and smoothed, and its speeds chosen
@@ -201,16 +202,16 @@ def plan(graph: Graph, ship: Ship, forecast: Forecast, start, goal, departure, d
             f = choice.snap_up(smoothed(choice.relax(land, f, waypoints(f))))
             try:
                 f = choice.retime(f, hours, per_hour=price)
-            except ValueError as e:  # no speeds on this way arrive in time as the buckets see it
+            except ValueError:  # no speeds on this way arrive in time as the buckets see it
                 if not slack:
                     return None
                 f = choice.fill_slack(f, hours)
         return f
 
-    kept, f = f, finish(f)
+    kept, f = f, None if f is None else finish(f)
     if ways is not None:  # finished, a way searched at another price, even one that arrived late, may burn less: keep the cheapest
         # The same cells at other speeds count as another way: shortcut and relax judge each move at its speed.
-        out["ways_t"], seen = [], [(kept.lat, kept.lon, choice.speed_index(kept))]
+        out["ways_t"], seen = [], [] if kept is None else [(kept.lat, kept.lon, choice.speed_index(kept))]
         for w in ways:
             k = choice.speed_index(w)
             if any(np.array_equal(w.lat, a) and np.array_equal(w.lon, b) and np.array_equal(k, c) for a, b, c in seen):
@@ -219,8 +220,11 @@ def plan(graph: Graph, ship: Ship, forecast: Forecast, start, goal, departure, d
             seen.append((w.lat, w.lon, k))
             g = finish(w, slack=False)
             out["ways_t"].append(None if g is None else round(g.cost / 1000, 2))
-            if g is not None and g.cost < f.cost:
+            if g is not None and (f is None or g.cost < f.cost):
                 f = g
+        if f is None:  # off the cells' detours, still none in time
+            out["error"] = "속력을 골라 가는 경로 중 도착 기한 안에 닿는 것을 찾지 못했어요."
+            return out
     on_shortest = False
     if keep_shortest:  # the shortest route with its speeds chosen too may beat the way found (open sea, mild weather)
         try:
