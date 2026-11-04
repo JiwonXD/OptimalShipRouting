@@ -262,8 +262,8 @@ def any_angle(
 
     Most arcs cross open ocean, so before land is looked up (arcs_on_land) an arc is sampled
     every 10 km or less: a step between two samples whose root cells and their eight
-    neighbours are all whole cells of water, and which moves no more than a cell, misses land.
-    Only the other steps are looked up.
+    neighbours are all whole cells of water (and deep, with shallow water as land), and which
+    moves no more than a cell, misses land. Only the other steps are looked up.
 
     The distance still to go is guessed from the steps between cells: their shortest distance
     to g (one Dijkstra from g, links included) over `steps_over`, how much longer the steps are
@@ -272,7 +272,7 @@ def any_angle(
     the search spread over all the water nearer the goal as the crow flies first.
     """
     t0 = time.perf_counter()
-    open_sea = open_water(graph)
+    open_sea = open_water(graph, land)
     jumps = {}  # node -> [(node, km, link, reversed)]
     ends = []
     for a, b, link in graph.links:
@@ -415,8 +415,10 @@ def _open_steps(safe, lat_south, root, lat0, lon0, lat1, lon1):
     return lat, lon, look
 
 
-def open_water(graph: Graph) -> OpenWater:
-    """The graph's root cells (the largest) are whole cells of water: a cell with land in it was split or left out."""
+def open_water(graph: Graph, land=None) -> OpenWater:
+    """The graph's root cells (the largest) are whole cells of water: a cell with land in it was
+    split or left out. Over shallow water (land a depth.LandOrShallow) only cells wholly deeper
+    than its limit count."""
     root = float(graph.size.max())
     whole = graph.size >= root * (1 - 1e-9)
     lat0 = float((graph.lat[whole] - root / 2).min())
@@ -424,6 +426,8 @@ def open_water(graph: Graph) -> OpenWater:
     j = np.rint((graph.lon[whole] - root / 2 + 180) / root).astype(int) % round(360 / root)
     free = np.zeros((i.max() + 3, round(360 / root)), bool)  # a row of land above and below
     free[i + 1, j] = True
+    if hasattr(land, "deep"):
+        free[1:-1] &= land.deep(root, lat0, free.shape[0] - 2)
     safe = free.copy()
     for di in (-1, 0, 1):
         for dj in (-1, 0, 1):

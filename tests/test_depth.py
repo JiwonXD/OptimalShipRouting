@@ -159,3 +159,22 @@ def test_a_channel_through_scattered_banks_never_clips_a_shallow_cell():
         straight = (link.lat[a] + f * (link.lat[a + 1] - link.lat[a]), link.lon[a] + f * (link.lon[a + 1] - link.lon[a]))
         for lat, lon in (along(*ends, f), straight):
             assert (-Scattered().elevation(lat, lon) > 15).all(), a
+
+
+def test_arcs_over_a_bank_are_not_cleared_as_open_water(gebco):
+    from shiprouting.sea.depth import Bathymetry, LandOrShallow
+    from shiprouting.sea.quadtree import Graph, arcs_on_land, open_water
+
+    b = Bathymetry(gebco)
+    deep = b.deeper_than(15.0, 0.25, 0.0, 4)
+    # The bank (cells at 0.375° and 0.625°) is read off up to the boxes' edges: the boxes from
+    # 0.75°N read the cells from 0.75° up, so they are deep.
+    assert not deep[:3, 720:723].any() and deep[3, 720:723].all()
+    assert deep[:, 700].all() and not deep[:, -1].any()  # and the shallow column by the dateline
+    obstacles = LandOrShallow(Land([]), b)
+    graph = Graph.build(Land([]), lat_limits=(0, 1), bathymetry=b)
+    sea = open_water(graph, obstacles)
+    for lat in (0.5, 0.375, 0.875):
+        clear = sea.clear(obstacles, lat, -3.0, lat, 4.0)
+        assert clear == (not arcs_on_land(obstacles, lat, -3.0, lat, 4.0, piece_km=5.0)[0])
+    assert not sea.clear(obstacles, 0.5, -3.0, 0.5, 4.0)
