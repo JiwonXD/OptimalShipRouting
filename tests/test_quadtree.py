@@ -161,6 +161,39 @@ def test_arcs_can_be_required_to_keep_clear_of_land():
     assert arcs_on_land(island, 0.105, 9.0, 0.105, 11.0, clearance_km=1.0).all()
 
 
+def test_the_search_along_arcs_finds_the_strait_the_steps_between_cells_hide():
+    from shiprouting.sea.quadtree import any_angle, arcs_on_land, straighten
+
+    # An island from 10°S to 1°N cut by a strait 0.1° wide at 0.6°S. Through the strait is the
+    # shorter way, but its small cells make the steps between centres zigzag: on the steps the
+    # way round the north end looks shorter, and straightening that way cannot change it.
+    land = Land([shapely.box(4.0, -10.0, 6.0, -0.6), shapely.box(4.0, -0.5, 6.0, 1.0)])
+    g = Graph.build(land, root=0.5, min_step=1 / 16, lat_limits=(-12.0, 12.0))
+    s, t = g.nearest(0.1, 0.2), g.nearest(0.1, 9.8)
+    steps = straighten(land, astar(g, s, t))
+    assert steps.lat.max() > 1.0  # round the north end
+    r = any_angle(land, g, s, t)
+    assert r.km < steps.km - 5
+    inside = (r.lon > 4) & (r.lon < 6)
+    assert inside.any() and np.all((r.lat[inside] > -0.6) & (r.lat[inside] < -0.5))
+    assert not arcs_on_land(land, r.lat[:-1], r.lon[:-1], r.lat[1:], r.lon[1:]).any()
+    assert r.clock[-1] == pytest.approx(r.km)
+
+
+def test_the_search_along_arcs_takes_links_whole_and_crosses_the_dateline():
+    from shiprouting.sea.quadtree import any_angle
+
+    canal = Link("운하", np.array([-20.0, -20.0]), np.array([-0.5, 2.5]))
+    g = Graph.build(WALL, root=1.0, min_step=1 / 16, lat_limits=(-40.0, 40.0), links=[canal])
+    r = any_angle(WALL, g, g.nearest(-20.5, -5.5), g.nearest(-20.5, 7.5))
+    assert r.links == ["운하"]
+    assert r.on_link.tolist() == [False, False, True, False, False]
+    assert r.km < astar(g, g.nearest(-20.5, -5.5), g.nearest(-20.5, 7.5)).km
+    r = any_angle(WALL, g, g.nearest(-10.5, 170.5), g.nearest(-12.5, -170.5))
+    assert len(r.lat) == 2  # one arc over open water
+    assert r.km == pytest.approx(haversine_km(-10.5, 170.5, -12.5, -170.5))
+
+
 def path(points, on_link=None):
     from shiprouting.sea.latlon import SearchResult
 

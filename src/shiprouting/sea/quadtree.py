@@ -247,6 +247,90 @@ def astar(
     return SearchResult(lat, lon, np.array(on_link, bool), used, km, expanded, time.perf_counter() - t0, best[g], np.array(at))
 
 
+def any_angle(land: Land, graph: Graph, s: int, g: int, max_seconds: float = math.inf) -> SearchResult:
+    """The shortest path from node s to node g, not held to the graph's edges (Lazy Theta*).
+
+    A cell may take as its parent any cell the great-circle arc from which misses land, not
+    only its neighbours, so the length the search compares is that of arcs, as the path is
+    sailed, rather than of steps between cell centres. astar compares the steps, which near a
+    coast zigzag between small cells and can make the shorter way look the longer one; cutting
+    the corners afterwards (straighten) cannot change the way. Links are taken as astar takes
+    them, and no arc skips one. The clock is the km sailed.
+    """
+    t0 = time.perf_counter()
+    jumps = {}  # node -> [(node, km, link, reversed)]
+    for a, b, link in graph.links:
+        km = (
+            float(haversine_km(graph.lat[a], graph.lon[a], link.lat[0], link.lon[0]))
+            + link.km
+            + float(haversine_km(graph.lat[b], graph.lon[b], link.lat[-1], link.lon[-1]))
+        )
+        jumps.setdefault(a, []).append((b, km, link, False))
+        jumps.setdefault(b, []).append((a, km, link, True))
+
+    def km(a, b):
+        return haversine_km(graph.lat[a], graph.lon[a], graph.lat[b], graph.lon[b])
+
+    best = {s: 0.0}
+    parent = {s: None}  # (node, link, reversed)
+    closed = set()
+    open_list = [(float(km(s, g)), s)]
+    expanded = 0
+    while open_list:
+        _, c = heapq.heappop(open_list)
+        if c in closed:
+            continue
+        lo, hi = graph.indptr[c], graph.indptr[c + 1]
+        p = parent[c]
+        if p is not None and p[1] is None and p[0] not in graph.indices[lo:hi]:
+            # Pushed as seen from its parent's parent without looking: look now; if land is in
+            # the way, take the best neighbour already done, as astar would.
+            if arcs_on_land(land, graph.lat[p[0]], graph.lon[p[0]], graph.lat[c], graph.lon[c])[0]:
+                done = [(best[int(n)] + float(k), int(n)) for n, k in zip(graph.indices[lo:hi], graph.km[lo:hi]) if int(n) in closed]
+                best[c], n = min(done)
+                parent[c] = (n, None, False)
+        closed.add(c)
+        expanded += 1
+        if c == g:
+            break
+        if time.perf_counter() - t0 > max_seconds:
+            raise TimeoutError(f"stopped after {max_seconds:g} s ({expanded} cells expanded)")
+        # From c's own parent when c was reached across open water, else from c.
+        b = parent[c][0] if parent[c] is not None and parent[c][1] is None else c
+        ns = graph.indices[lo:hi]
+        costs = best[b] + km(b, ns)
+        moves = [(int(n), float(w), b, None, False) for n, w in zip(ns, costs)]
+        moves += [(n, best[c] + k, c, link, rev) for n, k, link, rev in jumps.get(c, [])]
+        for n, cost, via, link, rev in moves:
+            if n not in closed and cost < best.get(n, math.inf):
+                best[n] = cost
+                parent[n] = (via, link, rev)
+                heapq.heappush(open_list, (cost + float(km(n, g)), n))
+    else:
+        raise ValueError(f"no route ({expanded} cells expanded)")
+
+    nodes, via = [g], []
+    while parent[nodes[-1]] is not None:
+        c, link, rev = parent[nodes[-1]]
+        via.append((link, rev))
+        nodes.append(c)
+    lat, lon, on_link, used = [graph.lat[s]], [graph.lon[s]], [], []
+    for n, (link, rev) in zip(reversed(nodes[:-1]), reversed(via)):
+        if link is not None:
+            pts_lat, pts_lon = (link.lat[::-1], link.lon[::-1]) if rev else (link.lat, link.lon)
+            lat += list(pts_lat)
+            lon += list(pts_lon)
+            on_link += [False] + [True] * (len(pts_lat) - 1)
+            used.append(link.name)
+        lat.append(graph.lat[n])
+        lon.append(graph.lon[n])
+        on_link.append(False)
+    lat, lon = np.array(lat), np.array(lon)
+    clock = np.r_[0.0, np.cumsum(haversine_km(lat[:-1], lon[:-1], lat[1:], lon[1:]))]
+    return SearchResult(lat, lon, np.array(on_link, bool), used, float(clock[-1]), expanded, time.perf_counter() - t0,
+                        float(clock[-1]), clock)
+
+
 def join_legs(legs: list[SearchResult]) -> SearchResult:
     """The legs as one path, each leg's clock carrying on from where the last one ended."""
     clock, end = [legs[0].clock], legs[0].clock[-1]

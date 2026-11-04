@@ -11,7 +11,7 @@ Waypoints are passed in order, each leg searched after the last. The least-fuel 
 either gives each leg a share of the time in proportion to its shortest distance
 (legs="distance"), or searches all legs at one price of an hour and meets the deadline
 for the voyage as a whole (legs="shared"). Given the land, the cells' steps are cut out:
-the shortest route's legs are straightened to great-circle arcs (quadtree.straighten),
+the shortest route's legs are searched along great-circle arcs (quadtree.any_angle),
 and the least-fuel route takes the shortcuts that burn no more fuel (SpeedChoice.shortcut)
 and moves its points sideways off the grid's eight directions where that is cheaper
 (SpeedChoice.relax).
@@ -40,6 +40,7 @@ from shiprouting.route.speed import SpeedChoice, meet_eta
 from shiprouting.sea.latlon import ICE_FREE, SearchResult, haversine_km
 from shiprouting.sea.quadtree import (
     Graph,
+    any_angle,
     arcs_on_land,
     astar,
     join_legs,
@@ -127,13 +128,13 @@ def plan(graph: Graph, ship: Ship, forecast: Forecast, start, goal, departure, d
     shortest = []
     for k, (a, b) in enumerate(zip(nodes[:-1], nodes[1:])):
         try:
-            shortest.append(astar(graph, a, b))
+            shortest.append(astar(graph, a, b) if land is None else any_angle(land, graph, a, b))
         except ValueError:  # searched all the water a reaches
             out["error"] = f"{names[k]}와 {names[k + 1]} 사이에 이어진 바닷길이 없어요 (카스피해처럼 바다로 이어지지 않은 물일 수 있어요)."
             return out
     if exact:
         shortest[0] = lead_in(shortest[0])
-    if land is not None:  # the cells' path steps between grid directions: cut it to great-circle arcs
+    if land is not None:  # cut into pieces of 20 km (the weather is taken per piece), and any corner left cut
         shortest = [straighten(land, leg, piece_km=20.0) for leg in shortest]
     r = smoothed(join_legs(shortest))
     need_kn = r.km / hours / 1.852
