@@ -282,13 +282,17 @@ def any_angle(land: Land, graph: Graph, s: int, g: int, max_seconds: float = mat
             continue
         lo, hi = graph.indptr[c], graph.indptr[c + 1]
         p = parent[c]
-        if p is not None and p[1] is None and p[0] not in graph.indices[lo:hi]:
-            # Pushed as seen from its parent's parent without looking: look now; if land is in
-            # the way, take the best neighbour already done, as astar would.
-            if arcs_on_land(land, graph.lat[p[0]], graph.lon[p[0]], graph.lat[c], graph.lon[c])[0]:
-                done = [(best[int(n)] + float(k), int(n)) for n, k in zip(graph.indices[lo:hi], graph.km[lo:hi]) if int(n) in closed]
-                best[c], n = min(done)
-                parent[c] = (n, None, False)
+        # Pushed as seen from its parent's parent without looking: look now; if land is in the
+        # way, take the best neighbour already done, as astar would.
+        if (
+            p is not None
+            and p[1] is None
+            and p[0] not in graph.indices[lo:hi]
+            and arcs_on_land(land, graph.lat[p[0]], graph.lon[p[0]], graph.lat[c], graph.lon[c])[0]
+        ):
+            done = [(best[int(n)] + float(k), int(n)) for n, k in zip(graph.indices[lo:hi], graph.km[lo:hi]) if int(n) in closed]
+            best[c], n = min(done)
+            parent[c] = (n, None, False)
         closed.add(c)
         expanded += 1
         if c == g:
