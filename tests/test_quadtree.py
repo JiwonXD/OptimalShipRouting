@@ -180,6 +180,22 @@ def test_the_search_along_arcs_finds_the_strait_the_steps_between_cells_hide():
     assert r.clock[-1] == pytest.approx(r.km)
 
 
+def test_arcs_over_open_water_are_cleared_without_looking_up_land_and_agree_with_it():
+    from shiprouting.sea.quadtree import arcs_on_land, open_water
+
+    rng = np.random.default_rng(1)
+    boxes = [shapely.box(x, y, x + w, y + h) for x, y, w, h in rng.uniform([-180, -30, 0.05, 0.05], [176, 26, 4, 4], (60, 4))]
+    land = Land(list(shapely.union_all(boxes).geoms))
+    g = Graph.build(land, root=0.5, min_step=1 / 8, lat_limits=(-40.0, 40.0))
+    sea = open_water(g)
+    near = np.nonzero(g.size < 0.5)[0]
+    p = np.r_[rng.integers(0, len(g.lat), 300), rng.choice(near, 300)]
+    q = np.r_[rng.integers(0, len(g.lat), 300), [rng.choice(near[np.abs(g.lat[near] - g.lat[i]) + np.abs(g.lon[near] - g.lon[i]) < 3]) for i in p[300:]]]
+    clear = np.array([sea.clear(land, g.lat[i], g.lon[i], g.lat[j], g.lon[j]) for i, j in zip(p, q)])
+    assert 0.1 < clear.mean() < 0.9
+    assert np.array_equal(clear, ~arcs_on_land(land, g.lat[p], g.lon[p], g.lat[q], g.lon[q], piece_km=5.0))
+
+
 def test_the_search_along_arcs_takes_links_whole_and_crosses_the_dateline():
     from shiprouting.sea.quadtree import any_angle
 
