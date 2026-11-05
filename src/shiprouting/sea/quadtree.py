@@ -10,6 +10,7 @@ the path it finds is then straightened by cutting corners where the straight
 line misses land.
 """
 
+import dataclasses
 import heapq
 import math
 import time
@@ -493,6 +494,60 @@ def straighten(land: Land, r: SearchResult, clearance_km: float = 0.0, piece_km:
     clock = np.r_[0.0, np.cumsum(haversine_km(lat[:-1], lon[:-1], lat[1:], lon[1:]))]
     return SearchResult(lat, lon, on_link, r.links, float(clock[-1]), r.expanded, time.perf_counter() - t0,
                         float(clock[-1]), clock)
+
+
+def tighten(land: Land, r: SearchResult, keep_points=(), step_km: float = 16.0, min_km: float = 0.25,
+            max_sweeps: int = 400) -> SearchResult:
+    """Pull a path taut: move each point sideways where that shortens the two arcs it joins and
+    they still miss land, as SpeedChoice.relax moves points for fuel. The search's turning points
+    are cell centres, so a path bending round a coast keeps some way off it; straighten cuts only
+    to the points the path already has. Odd and even points take turns; when a sweep moves
+    nothing the step is halved, down to min_km. Links, the two ends and keep_points stay. The
+    clock (and cost) is the distance."""
+    n = len(r.lat) - 1
+    lat, lon = r.lat.copy(), np.degrees(np.unwrap(np.radians(r.lon)))
+    fixed = np.zeros(n + 1, bool)
+    fixed[[0, -1, *keep_points]] = True
+    fixed[:-1] |= r.on_link
+    fixed[1:] |= r.on_link
+
+    def unit(la, lo):
+        p, q = np.radians(la), np.radians(lo)
+        return np.stack([np.cos(p) * np.cos(q), np.cos(p) * np.sin(q), np.sin(p)])
+
+    step, sweeps = step_km, 0
+    while n >= 2 and step >= min_km and sweeps < max_sweeps:
+        sweeps += 1
+        moved = 0
+        for parity in (1, 2):
+            i = np.arange(parity, n, 2)
+            i = i[~fixed[i]]
+            if not len(i):
+                continue
+            d0 = haversine_km(lat[i - 1], lon[i - 1], lat[i], lon[i]) + haversine_km(lat[i], lon[i], lat[i + 1], lon[i + 1])
+            a, b, p = unit(lat[i - 1], lon[i - 1]), unit(lat[i + 1], lon[i + 1]), unit(lat[i], lon[i])
+            side = np.cross(a, b, axis=0)
+            side /= np.maximum(np.linalg.norm(side, axis=0), 1e-15)
+            done = np.zeros(len(i), bool)
+            for sign in (1.0, -1.0):
+                d = sign * step / 6371.0088
+                q = np.cos(d) * p + np.sin(d) * side
+                q_lat = np.degrees(np.arctan2(q[2], np.hypot(q[0], q[1])))
+                q_lon = lon[i] + (np.degrees(np.arctan2(q[1], q[0])) - lon[i] + 180) % 360 - 180
+                d1 = haversine_km(lat[i - 1], lon[i - 1], q_lat, q_lon) + haversine_km(q_lat, q_lon, lat[i + 1], lon[i + 1])
+                j = np.nonzero((d1 < d0 * (1 - 1e-12)) & ~done)[0]
+                if len(j):
+                    ok = ~(arcs_on_land(land, lat[i[j] - 1], lon[i[j] - 1], q_lat[j], q_lon[j])
+                           | arcs_on_land(land, q_lat[j], q_lon[j], lat[i[j] + 1], lon[i[j] + 1]))
+                    j = j[ok]
+                    lat[i[j]], lon[i[j]] = q_lat[j], q_lon[j]
+                    d0[j], done[j] = d1[j], True
+            moved += int(done.sum())
+        if moved == 0:
+            step /= 2
+    lon = (lon + 180) % 360 - 180
+    clock = np.r_[0.0, np.cumsum(haversine_km(lat[:-1], lon[:-1], lat[1:], lon[1:]))]
+    return dataclasses.replace(r, lat=lat, lon=lon, km=float(clock[-1]), cost=float(clock[-1]), clock=clock)
 
 
 def smooth_turns(land: Land, r: SearchResult, sharp: float = 60.0, reach: int = 4, keep_points=()) -> SearchResult:

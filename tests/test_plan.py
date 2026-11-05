@@ -241,3 +241,20 @@ def test_a_plan_arrives_in_time_when_only_the_finished_ways_do(monkeypatch):
     assert all(not t["in_time"] for t in out["tries"][0])
     assert "least_fuel" in out and out["least_fuel"]["hours"] <= 60.0 + 1e-6
     assert out["least_fuel"]["fuel_t"] <= out["shortest"]["fuel_t"]
+
+
+def test_the_shortest_route_moved_sideways_for_the_weather_is_offered_too(monkeypatch):
+    # The search on the cells' steps need not come near the shortest route (searched along arcs):
+    # the shortest route itself is relaxed in the weather and offered as a least-fuel way.
+    relax, seen = plan_module.SpeedChoice.relax, []
+
+    def spy(self, land, r, keep=(), *a, **kw):
+        seen.append((np.array(r.lat), np.array(r.lon)))
+        return relax(self, land, r, keep, *a, **kw)
+
+    monkeypatch.setattr(plan_module.SpeedChoice, "relax", spy)
+    out = plan(70.0, land=LAND)
+    short = out["shortest"]
+    assert any(len(lat) == len(short["lat"]) and np.allclose(lat, short["lat"], atol=1e-4) and np.allclose(lon, short["lon"], atol=1e-4)
+               for lat, lon in seen)
+    assert out["least_fuel"]["fuel_t"] <= short["fuel_t"]

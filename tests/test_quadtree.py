@@ -266,3 +266,17 @@ def test_a_v_shaped_corner_is_cut_twice():
     s = smooth_turns(wall, r)
     assert len(s.lat) >= 5
     assert (turn_deg(s.lat, s.lon) < 60).all()
+
+
+def test_a_path_round_a_corner_is_pulled_taut_against_it():
+    from shiprouting.sea.quadtree import arcs_on_land, tighten
+
+    corner = Land([shapely.box(0.0, -2.0, 1.0, 0.8)])  # land up to 0.8°N between 0° and 1°E, across the straight way
+    r = path([(0.5, -1.0), (1.5, 0.0), (1.5, 0.5), (1.5, 1.0), (0.5, 2.0)])  # over it, some way north of the coast
+    t = tighten(corner, r)
+    # Round the two corners of the land, (0.8°N, 0°) and (0.8°N, 1°E): points move only sideways, so close to it.
+    taut = float(haversine_km(0.5, -1.0, 0.8, 0.0) + haversine_km(0.8, 0.0, 0.8, 1.0) + haversine_km(0.8, 1.0, 0.5, 2.0))
+    assert r.km > 1.2 * taut and t.km < 1.015 * taut
+    assert t.lat[1:-1].max() < 0.9
+    assert not arcs_on_land(corner, t.lat[:-1], t.lon[:-1], t.lat[1:], t.lon[1:]).any()
+    assert t.clock[-1] == pytest.approx(t.km) and (t.lat[[0, -1]] == r.lat[[0, -1]]).all()

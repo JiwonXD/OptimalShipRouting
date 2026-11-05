@@ -11,7 +11,8 @@ Waypoints are passed in order, each leg searched after the last. The least-fuel 
 either gives each leg a share of the time in proportion to its shortest distance
 (legs="distance"), or searches all legs at one price of an hour and meets the deadline
 for the voyage as a whole (legs="shared"). Given the land, the cells' steps are cut out:
-the shortest route's legs are searched along great-circle arcs (quadtree.any_angle),
+the shortest route's legs are searched along great-circle arcs (quadtree.any_angle) and pulled
+taut (quadtree.tighten),
 and the least-fuel route takes the shortcuts that burn no more fuel (SpeedChoice.shortcut)
 and moves its points sideways off the grid's eight directions where that is cheaper
 (SpeedChoice.relax).
@@ -20,7 +21,8 @@ kept, and the least-fuel route's speeds are chosen again on its final way, the l
 that arrives by the deadline (SpeedChoice.retime). With no waypoints, every way the price
 search found on its way to the deadline, in time or late, is finished so too, and the
 cheapest that arrives by the deadline is kept: finished, the fuel follows the way more than
-the price it was found at.
+the price it was found at. The shortest route, with its speeds chosen again and also moved
+sideways where the weather makes that cheaper (relax), is offered as a least-fuel way too.
 
 With currents, the surface current changes each move's speed over the ground (FuelCost),
 so the shortest route's one speed through the water is adjusted until it arrives at the
@@ -46,6 +48,7 @@ from shiprouting.sea.quadtree import (
     join_legs,
     smooth_turns,
     straighten,
+    tighten,
 )
 from shiprouting.weather.forecast import Forecast
 
@@ -135,7 +138,7 @@ def plan(graph: Graph, ship: Ship, forecast: Forecast, start, goal, departure, d
     if exact:
         shortest[0] = lead_in(shortest[0])
     if land is not None:  # cut into pieces of 20 km (the weather is taken per piece), and any corner left cut
-        shortest = [straighten(land, leg, piece_km=20.0) for leg in shortest]
+        shortest = [tighten(land, straighten(land, leg, piece_km=20.0)) for leg in shortest]
     r = smoothed(join_legs(shortest))
     need_kn = r.km / hours / 1.852
     if need_kn > max(speeds_kn):
@@ -228,12 +231,16 @@ def plan(graph: Graph, ship: Ship, forecast: Forecast, start, goal, departure, d
             return out
     on_shortest = False
     if keep_shortest:  # the shortest route with its speeds chosen too may beat the way found (open sea, mild weather)
-        try:
-            g = choice.retime(dataclasses.replace(r, clock=clock, cost=fuel), hours, per_hour=price)
-        except ValueError:
-            g = None
-        if g is not None and g.cost < f.cost:
-            f, on_shortest = g, True
+        s = dataclasses.replace(r, clock=clock, cost=fuel)
+        # and so may the shortest route moved sideways where the weather makes that cheaper: the
+        # search on the cells' steps need not come near it
+        for way, kept in ((s, True), *(((choice.snap_up(choice.relax(land, s, waypoints(s))), False),) if land is not None else ())):
+            try:
+                g = choice.retime(way, hours, per_hour=price)
+            except ValueError:
+                continue
+            if g.cost < f.cost:
+                f, on_shortest = g, kept
     out["least_fuel"] = describe(f, f.cost, choice.speeds_kn(f), float(f.clock[-1] - f.clock[0]), time.perf_counter() - t0)
     out["least_fuel"]["is_shortest"] = bool(on_shortest or (keep_shortest and f.cost > fuel))
     if keep_shortest and f.cost > fuel:  # the way and speeds found burn more than the shortest route as it sails, also in time: keep that
