@@ -71,8 +71,8 @@ def summary(lat, lon, kg, h, hours: float) -> dict:
         "hours": round(float(h.sum()), 1),
         "late_h": round(max(float(h.sum()) - hours, 0.0), 1),
         "fuel_t": round(float(kg.sum()) / 1000, 2),
-        "lat": np.round(lat, 4).tolist(),
-        "lon": np.round(lon, 4).tolist(),
+        "lat": np.round(lat, 6).tolist(),
+        "lon": np.round(lon, 6).tolist(),
     }
 
 

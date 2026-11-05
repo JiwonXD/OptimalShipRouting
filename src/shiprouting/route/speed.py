@@ -426,8 +426,8 @@ def run(graph: Graph, ship, forecast, speeds_kn, fixed_kn: float, max_tries: int
                 "expanded": r.expanded,
                 "seconds": round(r.seconds, 1),
                 "links": r.links,
-                "lat": np.round(r.lat, 4).tolist(),
-                "lon": np.round(r.lon, 4).tolist(),
+                "lat": np.round(r.lat, 6).tolist(),
+                "lon": np.round(r.lon, 6).tolist(),
                 "clock": np.round(r.clock, 2).tolist(),
             }
         print({k: ({kk: vv for kk, vv in v.items() if kk not in ("lat", "lon", "clock")} if isinstance(v, dict) else v) for k, v in row.items()}, flush=True)

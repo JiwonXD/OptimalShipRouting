@@ -264,8 +264,8 @@ def describe(r: SearchResult, fuel_kg: float, speeds_kn, hours: float, seconds: 
         "speeds_kn": {f"{v:g}": int(n) for v, n in zip(*np.unique(np.round(speeds_kn, 2), return_counts=True))},
         "links": r.links,
         "seconds": round(seconds, 1),
-        "lat": np.round(r.lat, 4).tolist(),
-        "lon": np.round(r.lon, 4).tolist(),
+        "lat": np.round(r.lat, 6).tolist(),
+        "lon": np.round(r.lon, 6).tolist(),
         "on_link": r.on_link.tolist(),
         "segment_kn": np.round(speeds_kn, 2).tolist(),
     }
