@@ -24,9 +24,8 @@ def _cell(grid, x):
 
 
 @numba.njit(cache=True)
-def sample(field, lat_grid, lon_grid, t_grid, lat, lon, t):
-    """Forecast.sample for one point; t in seconds, inside t_grid."""
-    k, wt = _cell(t_grid, t)
+def _place(lat_grid, lon_grid, lat, lon):
+    """sample()'s cell in the forecast's lat/lon grid and the weights of its upper sides."""
     dlat = lat_grid[1] - lat_grid[0]
     fy = (lat - lat_grid[0]) / dlat
     j = min(max(int(math.floor(fy)), 0), len(lat_grid) - 2)
@@ -37,6 +36,12 @@ def sample(field, lat_grid, lon_grid, t_grid, lat, lon, t):
     wx = fx - i0
     i0 %= len(lon_grid)
     i1 = (i0 + 1) % len(lon_grid)  # wraps across the dateline
+    return j, wy, i0, i1, wx
+
+
+@numba.njit(cache=True)
+def _blend(field, k, wt, j, wy, i0, i1, wx):
+    """sample() given its time cell (_cell) and place (_place): the same additions in the same order."""
     num = den = 0.0
     for kk, wk in ((k, 1 - wt), (k + 1, wt)):
         for jj, wj in ((j, 1 - wy), (j + 1, wy)):
@@ -46,6 +51,25 @@ def sample(field, lat_grid, lon_grid, t_grid, lat, lon, t):
                     num += wk * wj * wi * v
                     den += wk * wj * wi
     return num / den if den > 0 else math.nan
+
+
+@numba.njit(cache=True)
+def sample(field, lat_grid, lon_grid, t_grid, lat, lon, t):
+    """Forecast.sample for one point; t in seconds, inside t_grid."""
+    k, wt = _cell(t_grid, t)
+    j, wy, i0, i1, wx = _place(lat_grid, lon_grid, lat, lon)
+    return _blend(field, k, wt, j, wy, i0, i1, wx)
+
+
+@numba.njit(cache=True)
+def _weather(k, wt, j, wy, i0, i1, wx, wind_u, wind_v, Hs_f, T_m10, from_x, from_y, current_u, current_v, currents):
+    """The eight fields sample() reads for a move, its time and place found once (same values)."""
+    cu = cv = math.nan
+    if currents:
+        cu, cv = _blend(current_u, k, wt, j, wy, i0, i1, wx), _blend(current_v, k, wt, j, wy, i0, i1, wx)
+    return (cu, cv, _blend(wind_u, k, wt, j, wy, i0, i1, wx), _blend(wind_v, k, wt, j, wy, i0, i1, wx),
+            _blend(Hs_f, k, wt, j, wy, i0, i1, wx), _blend(T_m10, k, wt, j, wy, i0, i1, wx),
+            _blend(from_x, k, wt, j, wy, i0, i1, wx), _blend(from_y, k, wt, j, wy, i0, i1, wx))
 
 
 @numba.njit(cache=True)
@@ -154,20 +178,14 @@ def fuel_kg(
 ):
     for m in range(len(lat_a)):
         km, lat, lon, heading = _geometry(lat_a[m], lon_a[m], lat_b[m], lon_b[m])
+        j, wy, i0, i1, wx = _place(lat_grid, lon_grid, lat, lon)
         # Every speed at the same midpoint: only the time it is reached differs.
         for s in range(len(speed)):
-            t = _when(s, t0, frozen, hours[m], km, speed, t_grid, counts)
-            cu = cv = math.nan
-            if currents:
-                cu = sample(current_u, lat_grid, lon_grid, t_grid, lat, lon, t)
-                cv = sample(current_v, lat_grid, lon_grid, t_grid, lat, lon, t)
-            out[s, m], out_h[s, m] = _move(
-                s, km, heading, cu, cv,
-                sample(wind_u, lat_grid, lon_grid, t_grid, lat, lon, t), sample(wind_v, lat_grid, lon_grid, t_grid, lat, lon, t),
-                sample(Hs_f, lat_grid, lon_grid, t_grid, lat, lon, t), sample(T_m10, lat_grid, lon_grid, t_grid, lat, lon, t),
-                sample(from_x, lat_grid, lon_grid, t_grid, lat, lon, t), sample(from_y, lat_grid, lon_grid, t_grid, lat, lon, t),
-                counts, speed, R_hull, wind_deg, C_DA, A_XV, rho_air, T01_grid, angle_grid, per_Hs2, R_grid, kg_h,
-            )  # fmt: skip
+            k, wt = _cell(t_grid, _when(s, t0, frozen, hours[m], km, speed, t_grid, counts))
+            cu, cv, u, v, Hs, Tm, fx, fy = _weather(k, wt, j, wy, i0, i1, wx, wind_u, wind_v, Hs_f, T_m10, from_x, from_y,
+                                                    current_u, current_v, currents)
+            out[s, m], out_h[s, m] = _move(s, km, heading, cu, cv, u, v, Hs, Tm, fx, fy,
+                                           counts, speed, R_hull, wind_deg, C_DA, A_XV, rho_air, T01_grid, angle_grid, per_Hs2, R_grid, kg_h)
 
 
 @numba.njit(cache=True)
@@ -251,18 +269,12 @@ def fuel_kg_at(
     for m in numba.prange(n):
         s = at[m]
         km, lat, lon, heading = _geometry(lat_a[m], lon_a[m], lat_b[m], lon_b[m])
-        t = _when(s, t0, frozen, hours[m], km, speed, t_grid, tally[m])
-        cu = cv = math.nan
-        if currents:
-            cu = sample(current_u, lat_grid, lon_grid, t_grid, lat, lon, t)
-            cv = sample(current_v, lat_grid, lon_grid, t_grid, lat, lon, t)
-        out[m], out_h[m] = _move(
-            s, km, heading, cu, cv,
-            sample(wind_u, lat_grid, lon_grid, t_grid, lat, lon, t), sample(wind_v, lat_grid, lon_grid, t_grid, lat, lon, t),
-            sample(Hs_f, lat_grid, lon_grid, t_grid, lat, lon, t), sample(T_m10, lat_grid, lon_grid, t_grid, lat, lon, t),
-            sample(from_x, lat_grid, lon_grid, t_grid, lat, lon, t), sample(from_y, lat_grid, lon_grid, t_grid, lat, lon, t),
-            tally[m], speed, R_hull, wind_deg, C_DA, A_XV, rho_air, T01_grid, angle_grid, per_Hs2, R_grid, kg_h,
-        )  # fmt: skip
+        j, wy, i0, i1, wx = _place(lat_grid, lon_grid, lat, lon)
+        k, wt = _cell(t_grid, _when(s, t0, frozen, hours[m], km, speed, t_grid, tally[m]))
+        cu, cv, u, v, Hs, Tm, fx, fy = _weather(k, wt, j, wy, i0, i1, wx, wind_u, wind_v, Hs_f, T_m10, from_x, from_y,
+                                                current_u, current_v, currents)
+        out[m], out_h[m] = _move(s, km, heading, cu, cv, u, v, Hs, Tm, fx, fy,
+                                 tally[m], speed, R_hull, wind_deg, C_DA, A_XV, rho_air, T01_grid, angle_grid, per_Hs2, R_grid, kg_h)
     for m in range(n):
         for s in range(len(speed)):
             for c in range(3):
@@ -389,20 +401,14 @@ def search(
             if closed[n]:
                 continue
             km, lat, lon, heading = _geometry(glat[c], glon[c], glat[n], glon[n])
+            j, wy, i0, i1, wx = _place(lat_grid, lon_grid, lat, lon)
             w, dt, usable = math.inf, math.nan, True
             for s in range(len(speed)):
-                t = _when(s, t0, frozen, clock[c], km, speed, t_grid, counts)
-                cu = cv = math.nan
-                if currents:
-                    cu = sample(current_u, lat_grid, lon_grid, t_grid, lat, lon, t)
-                    cv = sample(current_v, lat_grid, lon_grid, t_grid, lat, lon, t)
-                kg, h = _move(
-                    s, km, heading, cu, cv,
-                    sample(wind_u, lat_grid, lon_grid, t_grid, lat, lon, t), sample(wind_v, lat_grid, lon_grid, t_grid, lat, lon, t),
-                    sample(Hs_f, lat_grid, lon_grid, t_grid, lat, lon, t), sample(T_m10, lat_grid, lon_grid, t_grid, lat, lon, t),
-                    sample(from_x, lat_grid, lon_grid, t_grid, lat, lon, t), sample(from_y, lat_grid, lon_grid, t_grid, lat, lon, t),
-                    counts, speed, R_hull, wind_deg, C_DA, A_XV, rho_air, T01_grid, angle_grid, per_Hs2, R_grid, kg_h,
-                )  # fmt: skip
+                k, wt = _cell(t_grid, _when(s, t0, frozen, clock[c], km, speed, t_grid, counts))
+                cu, cv, u, v, Hs, Tm, fx, fy = _weather(k, wt, j, wy, i0, i1, wx, wind_u, wind_v, Hs_f, T_m10, from_x, from_y,
+                                                        current_u, current_v, currents)
+                kg, h = _move(s, km, heading, cu, cv, u, v, Hs, Tm, fx, fy,
+                              counts, speed, R_hull, wind_deg, C_DA, A_XV, rho_air, T01_grid, angle_grid, per_Hs2, R_grid, kg_h)
                 total = kg + price * h
                 if math.isnan(total):  # np.argmin would take it, and no cost is less than nan
                     usable = False
