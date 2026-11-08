@@ -6,7 +6,10 @@ plan would have:
 
 - tries N: only the first N price searches (meet_eta's max_tries), the ways they found finished;
 - top K: every price searched, only the K ways cheapest on the cells finished;
-- in time: only the ways that arrived in time on the cells finished.
+- in time: only the ways that arrived in time on the cells finished;
+- and the first N tries with only their ways in time finished.
+
+Each also with a rough estimate of the seconds it saves (seconds_saved).
 
 The shortest route as it sails, and with its speeds chosen again before and after it is moved
 sideways, are weighed in every case. A
@@ -49,23 +52,39 @@ def pick(found: dict, use) -> float | None:
 
 
 def policies(found: dict) -> dict:
+    """Per policy: (fuel of the way kept, try indices searched, way indices finished)."""
     grid, in_time, done = candidates(found)
     n = len(done)
-    out = {"all": pick(found, range(n))}
+    every = range(n)
+    out = {"all": (pick(found, every), every, every)}
+
+    def first(k, use):
+        # with the first k tries only, the kept way is the cheapest of them in time (finished)
+        kept = [done[i] for i in range(k) if in_time[i] and done[i] is not None]
+        return pick(dict(found, kept_t=min(kept) if kept else found["kept_t"]), use)
+
     for k in (2, 3, 4, 6, 8):
-        if k < n:
-            # with the first k tries only, the kept way is the cheapest of them in time (finished)
-            kept = [done[i] for i in range(k) if in_time[i] and done[i] is not None]
-            first = dict(found, kept_t=min(kept) if kept else found["kept_t"])
-            out[f"tries {k}"] = pick(first, range(k))
-        else:
-            out[f"tries {k}"] = out["all"]
-    order = sorted(range(n), key=lambda i: grid[i])
+        m = min(k, n)
+        out[f"tries {k}"] = (first(m, range(m)), range(m), range(m))
+        timely = [i for i in range(m) if in_time[i]]
+        out[f"tries {k} + in time"] = (first(m, timely), range(m), timely)
+    order = sorted(every, key=lambda i: grid[i])
     for k in (1, 2, 3, 4):
-        out[f"top {k}"] = pick(found, order[:k])
-    out["in time"] = pick(found, [i for i in range(n) if in_time[i]])
-    out["n_tries"], out["n_finished"] = n, sum(1 for i in range(n) if (found["ways_same_as"] or [None] * n)[i] is None)
+        out[f"top {k}"] = (pick(found, order[:k]), every, order[:k])
+    timely = [i for i in every if in_time[i]]
+    out["in time"] = (pick(found, timely), every, timely)
     return out
+
+
+def seconds_saved(found: dict, searched, finished) -> float:
+    """A rough estimate: the dropped tries' search seconds, and the dropped ways' share of the rest
+    of the least-fuel part (the kept way and the shortest route's two retimes counted as 2.5 ways)."""
+    tries = [t for leg in found["tries"] for t in leg]
+    same = found["ways_same_as"] or [None] * len(tries)
+    new = [i for i in range(len(tries)) if same[i] is None]  # finished (or tried to be)
+    search = sum(t["seconds"] for t in tries)
+    per_way = max(found["least_fuel_s"] - search, 0.0) / (len(new) + 2.5)
+    return sum(t["seconds"] for i, t in enumerate(tries) if i not in set(searched)) + per_way * len(set(new) - set(finished))
 
 
 def main() -> None:
@@ -84,20 +103,29 @@ def main() -> None:
                 found = entry["found"]
                 if "shortest_t" not in found and k == 0:  # logs before it was kept: the voyage's own is the first plan's
                     found = dict(found, shortest_t=v["planned"]["shortest_t"])
-                p = policies(found)
-                rows.append({"voyage": os.path.basename(path)[:-5], "plan": k, "planned_t": entry["planned_t"],
-                             "seconds": entry["seconds"]} | p)
+                for name, (fuel, searched, finished) in policies(found).items():
+                    rows.append({"voyage": os.path.basename(path)[:-5], "plan": k, "planned_t": entry["planned_t"],
+                                 "seconds": entry["seconds"], "policy": name, "fuel_t": fuel,
+                                 "saved_s": round(seconds_saved(found, searched, finished), 1)})
     if not rows:
         raise SystemExit("no voyage logs with a 'found' block")
-    names = [k for k in rows[0] if k not in ("voyage", "plan", "planned_t", "seconds", "n_tries", "n_finished")]
-    print(f"{len(rows)} plans; model check: 'all' vs planned_t, max |diff| "
-          f"{max(abs(r['all'] - r['planned_t']) for r in rows if r['all'] is not None):.2f} t")
-    print(f"{'policy':10s} {'plans worse':>11s} {'sum +t':>8s} {'worst +t':>8s} {'worst %':>8s}")
-    for name in names:
-        d = [(r[name] - r["all"], (r[name] - r["all"]) / r["all"]) for r in rows if r[name] is not None and r["all"] is not None]
+    full = {(r["voyage"], r["plan"]): r["fuel_t"] for r in rows if r["policy"] == "all"}
+    print(f"{len(full)} plans; model check: 'all' vs planned_t, max |diff| "
+          f"{max(abs(r['fuel_t'] - r['planned_t']) for r in rows if r['policy'] == 'all'):.2f} t")
+    routes = sorted({r["voyage"].rsplit("_", 2)[0] for r in rows})
+    print(f"{'policy':20s} {'worse':>5s} {'sum +t':>7s} {'worst +t':>8s} {'worst %':>7s}  median plan s after (saved), " + ", ".join(routes))
+    for name in dict.fromkeys(r["policy"] for r in rows):
+        d = [(r["fuel_t"] - full[r["voyage"], r["plan"]], (r["fuel_t"] - full[r["voyage"], r["plan"]]) / full[r["voyage"], r["plan"]])
+             for r in rows if r["policy"] == name and r["fuel_t"] is not None]
         worse = [x for x in d if x[0] > 0.005]
-        print(f"{name:10s} {len(worse):11d} {sum(x[0] for x in d):8.2f} {max((x[0] for x in d), default=0):8.2f}"
-              f" {100 * max((x[1] for x in d), default=0):7.2f}%")
+        by_route = []
+        for route in routes:
+            mine = [r for r in rows if r["policy"] == name and r["voyage"].rsplit("_", 2)[0] == route]
+            after = sorted(r["seconds"] - r["saved_s"] for r in mine)
+            saved = sorted(r["saved_s"] for r in mine)
+            by_route.append(f"{after[len(after) // 2]:.0f} ({saved[len(saved) // 2]:.0f})")
+        print(f"{name:20s} {len(worse):5d} {sum(x[0] for x in d):7.2f} {max((x[0] for x in d), default=0):8.2f}"
+              f" {100 * max((x[1] for x in d), default=0):6.2f}%  " + ", ".join(by_route))
     if args.out:
         with open(args.out, "w", newline="", encoding="utf-8") as f:
             w = csv.DictWriter(f, fieldnames=list(rows[0]))
