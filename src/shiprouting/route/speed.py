@@ -21,7 +21,7 @@ from shiprouting.route import kernel
 from shiprouting.route.fuel import KNOT, FuelCost, fuel_kg, stacked_tables
 from shiprouting.sea.latlon import SearchResult, haversine_km
 from shiprouting.sea.land import Land
-from shiprouting.sea.quadtree import Graph, along, arcs_on_land, astar, join_legs
+from shiprouting.sea.quadtree import Graph, along, arcs_on_land, astar, join_legs, trace
 
 
 @dataclass
@@ -53,6 +53,64 @@ class SpeedChoice:
             return total[pick, moves], h[pick, moves]
 
         return costs
+
+    def search(self, graph: Graph, s: int, g: int, max_seconds: float = math.inf, clock0: float = 0.0,
+               chunk: int = 100_000, heap: int | None = None) -> SearchResult:
+        """astar(graph, s, g, self.edge_cost(graph), self.link_cost, lambda n: 0.0, max_seconds, clock0),
+        compiled (kernel.search): the same path, clock and cost. The time limit is checked every
+        `chunk` cells expanded; the heap starts with room for `heap` entries (twice the nodes)
+        and doubles when full."""
+        t0 = time.perf_counter()
+        if self._args is None:
+            self._args = stacked_tables(self.costs)
+        speed = np.array([c.speed for c in self.costs])
+        calm = np.array([c.calm_kg_per_km for c in self.costs])
+        n_nodes = len(graph.lat)
+        jumps = [[] for _ in range(n_nodes)] if graph.links else None
+        for i, (a, b, link) in enumerate(graph.links):  # as astar builds its jumps
+            km = (
+                float(haversine_km(graph.lat[a], graph.lon[a], link.lat[0], link.lon[0]))
+                + link.km
+                + float(haversine_km(graph.lat[b], graph.lon[b], link.lat[-1], link.lon[-1]))
+            )
+            jumps[a].append((b, km, i, False))
+            jumps[b].append((a, km, i, True))
+        jptr = np.zeros(n_nodes + 1, np.int64)
+        flat = []
+        if jumps is not None:
+            jptr[1:] = np.cumsum([len(j) for j in jumps])
+            flat = [j for js in jumps for j in js]
+        jto = np.array([j[0] for j in flat], np.int64)
+        jkg = np.array([[j[1] * c for c in calm] for j in flat], float).reshape(len(flat), len(speed))
+        jh = np.array([[j[1] / (v * 3.6) for v in speed] for j in flat], float).reshape(len(flat), len(speed))
+        best, clock = np.full(n_nodes, np.inf), np.zeros(n_nodes)
+        parent, via, closed = np.full(n_nodes, -1, np.int64), np.full(n_nodes, -1, np.int64), np.zeros(n_nodes, bool)
+        hc, hn = np.empty(heap or 2 * n_nodes), np.empty(heap or 2 * n_nodes, np.int64)
+        best[s], clock[s] = 0.0, clock0
+        state, counts = np.array([1, 0], np.int64), np.zeros((len(speed), 3), np.int64)
+        hc[0], hn[0] = 0.0, s
+        indptr, indices = graph.indptr.astype(np.int64), graph.indices.astype(np.int64)
+        while True:
+            status = kernel.search(indptr, indices, graph.lat, graph.lon, jptr, jto, jkg, jh, g, float(self.per_hour), chunk,
+                                   best, clock, parent, via, closed, hc, hn, state, counts, *self._args)  # fmt: skip
+            if status == 1:
+                break
+            if status == 3:
+                raise ValueError(f"no route ({state[1]} cells expanded)")
+            if status == 2:
+                hc, hn = np.r_[hc, np.empty(len(hc))], np.r_[hn, np.empty(len(hn), np.int64)]
+            if time.perf_counter() - t0 > max_seconds:
+                raise TimeoutError(f"stopped after {max_seconds:g} s ({state[1]} cells expanded)")
+        for c, m in zip(self.costs, counts):
+            c.no_waves += int(m[0])
+            c.over_mcr += int(m[1])
+            c.beyond_forecast += int(m[2])
+        back, n = {s: None}, g
+        while n != s:
+            j = via[n]
+            back[n] = (int(parent[n]), None, False) if j < 0 else (int(parent[n]), graph.links[flat[j][2]][2], flat[j][3])
+            n = int(parent[n])
+        return trace(graph, s, g, back, clock, float(best[g]), int(state[1]), time.perf_counter() - t0)
 
     def link_cost(self, link, km: float, hours: float) -> tuple[float, float]:
         kg, h = min((c.link_cost(link, km, hours) for c in self.costs), key=lambda kg_h: kg_h[0] + self.per_hour * kg_h[1])
@@ -341,7 +399,7 @@ def meet_eta(graph: Graph, s: int, g: int, choice: SpeedChoice, eta_hours: float
         choice.per_hour = per_hour
         legs, clock = [], 0.0
         for a, b in zip([s, *via], [*via, g]):
-            legs.append(astar(graph, a, b, choice.edge_cost(graph), choice.link_cost, lambda n: 0.0, max_seconds, clock))
+            legs.append(choice.search(graph, a, b, max_seconds, clock))
             clock = float(legs[-1].clock[-1])
         r = join_legs(legs)
         fuel = r.cost - per_hour * float(r.clock[-1])

@@ -225,3 +225,20 @@ def test_retime_compiled_picks_the_same_speeds_as_before(currents):
         assert np.array_equal(sc.speed_index(out), k) or out.cost <= sc.sail(r, k)[1][k, np.arange(40)].sum() * (1 + 1e-12)
         _, kg, _ = sc.sail(r, k)
         assert out.cost == pytest.approx(kg[k, np.arange(40)].sum(), rel=1e-12)
+
+
+@pytest.mark.parametrize("currents,price", [(False, 0.0), (True, 2500.0)])
+def test_compiled_search_finds_what_astar_finds(currents, price):
+    from shiprouting.sea.links import Link
+
+    canal = Link("운하", np.array([0.0, 0.0]), np.array([148.6, 150.4]))
+    graph = Graph.build(Land([shapely.box(149.0, -30.0, 150.0, 30.0)]), root=1.0, min_step=0.25, lat_limits=(-9.0, 9.0), links=[canal])
+    sc = _varied_choice(currents)
+    sc.per_hour = price
+    s, g = graph.nearest(-4.5, 144.5), graph.nearest(5.5, 156.5)
+    want = astar(graph, s, g, sc.edge_cost(graph), sc.link_cost, lambda n: 0.0, clock0=3.0)
+    got = sc.search(graph, s, g, clock0=3.0, chunk=50, heap=16)  # resumed many times, its heap grown
+    assert want.links == got.links == ["운하"]
+    assert np.array_equal(got.lat, want.lat) and np.array_equal(got.lon, want.lon) and np.array_equal(got.on_link, want.on_link)
+    assert np.array_equal(got.clock, want.clock)
+    assert got.cost == want.cost and got.expanded == want.expanded

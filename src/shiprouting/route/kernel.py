@@ -282,3 +282,119 @@ def prune(t, f, kg, h, left_h, end, dt_hours, price):
                 keep[best[b]] = True
     idx = np.nonzero(keep)[0]
     return t2[idx], f2[idx], idx % L, idx // L
+
+
+@numba.njit(cache=True)
+def _less(hc, hn, a, b):
+    """Heap entry a before b: by cost, then by node, as heapq orders (cost, node) tuples."""
+    return hc[a] < hc[b] or (hc[a] == hc[b] and hn[a] < hn[b])
+
+
+@numba.njit(cache=True)
+def _push(hc, hn, size, cost, node):
+    i = size
+    hc[i], hn[i] = cost, node
+    while i > 0:
+        p = (i - 1) // 2
+        if not _less(hc, hn, i, p):
+            break
+        hc[i], hc[p], hn[i], hn[p] = hc[p], hc[i], hn[p], hn[i]
+        i = p
+    return size + 1
+
+
+@numba.njit(cache=True)
+def _pop(hc, hn, size):
+    cost, node = hc[0], hn[0]
+    size -= 1
+    hc[0], hn[0] = hc[size], hn[size]
+    i = 0
+    while True:
+        a, b, m = 2 * i + 1, 2 * i + 2, i
+        if a < size and _less(hc, hn, a, m):
+            m = a
+        if b < size and _less(hc, hn, b, m):
+            m = b
+        if m == i:
+            break
+        hc[i], hc[m], hn[i], hn[m] = hc[m], hc[i], hn[m], hn[i]
+        i = m
+    return cost, node, size
+
+
+@numba.njit(cache=True)
+def search(
+    indptr, indices, glat, glon, jptr, jto, jkg, jh,  # the graph, and its links as jumps per node with kg and hours per speed
+    g, price, budget, best, clock, parent, via, closed, hc, hn, state, counts,  # goal, price of an hour, the search's state
+    t0, frozen, speed, R_hull, wind_deg, C_DA, A_XV, rho_air, T01_grid, angle_grid, per_Hs2, R_grid, kg_h,
+    lat_grid, lon_grid, t_grid, wind_u, wind_v, Hs_f, from_x, from_y, T_m10, current_u, current_v, currents,
+):
+    """quadtree.astar with SpeedChoice.edge_cost and link_cost and no heuristic, compiled: each
+    move at the speed with the least fuel + price × hours, at the time its cell is reached.
+    Expands up to `budget` cells and returns 0, or 1 on reaching g, 2 when the heap needs more
+    room, 3 when nothing is left to expand; state holds the heap's size and the cells expanded."""
+    size, expanded = state[0], state[1]
+    room = 0
+    for c in range(len(indptr) - 1):
+        room = max(room, indptr[c + 1] - indptr[c] + jptr[c + 1] - jptr[c])
+    done, status = 0, 3
+    while size > 0:
+        if done >= budget:
+            status = 0
+            break
+        if size + room > len(hc):
+            status = 2
+            break
+        _, c, size = _pop(hc, hn, size)
+        if closed[c]:
+            continue
+        closed[c] = True
+        expanded += 1
+        done += 1
+        if c == g:
+            status = 1
+            break
+        for e in range(indptr[c], indptr[c + 1]):
+            n = indices[e]
+            if closed[n]:
+                continue
+            km, lat, lon, heading = _geometry(glat[c], glon[c], glat[n], glon[n])
+            w, dt, usable = math.inf, math.nan, True
+            for s in range(len(speed)):
+                t = _when(s, t0, frozen, clock[c], km, speed, t_grid, counts)
+                cu = cv = math.nan
+                if currents:
+                    cu = sample(current_u, lat_grid, lon_grid, t_grid, lat, lon, t)
+                    cv = sample(current_v, lat_grid, lon_grid, t_grid, lat, lon, t)
+                kg, h = _move(
+                    s, km, heading, cu, cv,
+                    sample(wind_u, lat_grid, lon_grid, t_grid, lat, lon, t), sample(wind_v, lat_grid, lon_grid, t_grid, lat, lon, t),
+                    sample(Hs_f, lat_grid, lon_grid, t_grid, lat, lon, t), sample(T_m10, lat_grid, lon_grid, t_grid, lat, lon, t),
+                    sample(from_x, lat_grid, lon_grid, t_grid, lat, lon, t), sample(from_y, lat_grid, lon_grid, t_grid, lat, lon, t),
+                    counts, speed, R_hull, wind_deg, C_DA, A_XV, rho_air, T01_grid, angle_grid, per_Hs2, R_grid, kg_h,
+                )  # fmt: skip
+                total = kg + price * h
+                if math.isnan(total):  # np.argmin would take it, and no cost is less than nan
+                    usable = False
+                    break
+                if s == 0 or total < w:
+                    w, dt = total, h
+            cost = best[c] + w
+            if usable and cost < best[n]:
+                best[n], clock[n], parent[n], via[n] = cost, clock[c] + dt, c, -1
+                size = _push(hc, hn, size, cost, n)
+        for j in range(jptr[c], jptr[c + 1]):
+            n = jto[j]
+            if closed[n]:
+                continue
+            w, dt = jkg[j, 0] + price * jh[j, 0], jh[j, 0]
+            for s in range(1, len(speed)):
+                total = jkg[j, s] + price * jh[j, s]
+                if total < w:
+                    w, dt = total, jh[j, s]
+            cost = best[c] + w
+            if cost < best[n]:
+                best[n], clock[n], parent[n], via[n] = cost, clock[c] + dt, c, j
+                size = _push(hc, hn, size, cost, n)
+    state[0], state[1] = size, expanded
+    return status

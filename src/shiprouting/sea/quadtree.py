@@ -222,7 +222,12 @@ def astar(
                 heapq.heappush(open_list, (cost + h(n), n))
     else:
         raise ValueError(f"no route ({expanded} cells expanded)")
+    return trace(graph, s, g, parent, clock, best[g], expanded, time.perf_counter() - t0)
 
+
+def trace(graph: Graph, s: int, g: int, parent, clock, cost: float, expanded: int, seconds: float) -> SearchResult:
+    """The path a search found, read back from g: parent[n] is (node, link, reversed) or None at s,
+    clock[n] the clock on reaching n."""
     nodes, via = [g], []  # from goal back to start, each with the link that led into it
     while parent[nodes[-1]] is not None:
         c, link, rev = parent[nodes[-1]]
@@ -246,7 +251,7 @@ def astar(
         on_link.append(False)
     lat, lon = np.array(lat), np.array(lon)
     km = float(haversine_km(lat[:-1], lon[:-1], lat[1:], lon[1:]).sum())
-    return SearchResult(lat, lon, np.array(on_link, bool), used, km, expanded, time.perf_counter() - t0, best[g], np.array(at))
+    return SearchResult(lat, lon, np.array(on_link, bool), used, km, expanded, seconds, cost, np.array(at))
 
 
 def any_angle(

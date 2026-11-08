@@ -56,21 +56,21 @@ def every_route(
 ) -> dict:
     """Plan as the oracle does, keeping every route the price search found, each finished and costed."""
     found = []
-    meet_eta, astar = plan_module.meet_eta, speed.astar
+    meet_eta, search_one = plan_module.meet_eta, speed.SpeedChoice.search
 
     def keeping(graph, s, g, choice, eta_hours, **kw):
         routes = []
 
-        def search(*a, **k):
-            r = astar(*a, **k)
-            routes.append((choice.per_hour, r))
+        def search(self, *a, **k):
+            r = search_one(self, *a, **k)
+            routes.append((self.per_hour, r))
             return r
 
-        speed.astar = search
+        speed.SpeedChoice.search = search
         try:
             f, tries = meet_eta(graph, s, g, choice, eta_hours, **kw)
         finally:
-            speed.astar = astar
+            speed.SpeedChoice.search = search_one
         found.append((choice, eta_hours, routes))
         return f, tries
 
