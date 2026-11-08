@@ -110,7 +110,7 @@ def voyage(graph: Graph, ship: Ship, land, runs: Runs, came: Forecast, start, go
             "planned_t": f["fuel_t"], "planned_h": f["hours"], "seconds": round(time.perf_counter() - t0, 1),
             "tries": sum(len(t) for t in p["tries"]),
             "found": {"tries": p["tries"], "kept_t": p.get("kept_t"), "ways_t": p.get("ways_t"), "ways_same_as": p.get("ways_same_as"),
-                      "shortest_finished_t": p.get("shortest_finished_t"), "least_fuel_s": p["least_fuel"]["seconds"],
+                      "shortest_finished_t": p.get("shortest_finished_t"), "shortest_t": p["shortest"]["fuel_t"], "least_fuel_s": p["least_fuel"]["seconds"],
                       "shortest_s": p["shortest"]["seconds"]},  # every way the plan weighed, to judge searching or finishing fewer
             "sailed_km": round(float(seg_km.sum()), 1), "sailed_h": round(float(h.sum()), 1), "sailed_t": round(float(kg.sum()) / 1000, 2),
         })  # fmt: skip
