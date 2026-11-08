@@ -46,6 +46,7 @@ from shiprouting.sea.quadtree import (
     arcs_on_land,
     astar,
     join_legs,
+    open_water,
     smooth_turns,
     straighten,
     tighten,
@@ -192,6 +193,8 @@ def plan(graph: Graph, ship: Ship, forecast: Forecast, start, goal, departure, d
     # None arrived in time on the cells (finished, one may still): the highest price tried, time being short
     price = float(np.mean(met)) if met else max(t["per_hour"] for tries in out["tries"] for t in tries)
 
+    open_sea = None if land is None else open_water(graph, land)  # arcs over it need no land lookup
+
     def finish(f, slack=True):
         """A way found, from the start point (start_exact), its corners cut, relaxed and smoothed, and its speeds chosen
         again for the deadline. None if it cannot arrive in time and not slack (else its slack is filled the old way)."""
@@ -202,8 +205,8 @@ def plan(graph: Graph, ship: Ship, forecast: Forecast, start, goal, departure, d
             f_clock, f_kg, _ = choice.sail(dataclasses.replace(g, clock=np.r_[f.clock[0], g.clock[1:]]), k)
             f = dataclasses.replace(g, clock=f_clock, cost=float(f_kg[k, np.arange(len(k))].sum()))
         if land is not None:
-            f = choice.shortcut(land, f, waypoints(f))
-            f = choice.snap_up(smoothed(choice.relax(land, f, waypoints(f))))
+            f = choice.shortcut(land, f, waypoints(f), open_sea=open_sea)
+            f = choice.snap_up(smoothed(choice.relax(land, f, waypoints(f), open_sea=open_sea)))
             try:
                 f = choice.retime(f, hours, per_hour=price)
             except ValueError:  # no speeds on this way arrive in time as the buckets see it
@@ -234,7 +237,7 @@ def plan(graph: Graph, ship: Ship, forecast: Forecast, start, goal, departure, d
         s = dataclasses.replace(r, clock=clock, cost=fuel)
         # and so may the shortest route moved sideways where the weather makes that cheaper: the
         # search on the cells' steps need not come near it
-        for way, kept in ((s, True), *(((choice.snap_up(choice.relax(land, s, waypoints(s))), False),) if land is not None else ())):
+        for way, kept in ((s, True), *(((choice.snap_up(choice.relax(land, s, waypoints(s), open_sea=open_sea)), False),) if land is not None else ())):
             try:
                 g = choice.retime(way, hours, per_hour=price)
             except ValueError:

@@ -177,7 +177,7 @@ def test_the_shortest_route_is_kept_when_the_search_finds_nothing_better(monkeyp
 
 
 def test_the_shortest_route_with_its_speeds_chosen_is_kept_when_the_way_found_is_longer(monkeypatch):
-    monkeypatch.setattr(plan_module.SpeedChoice, "shortcut", lambda self, land, f, keep: f)  # the way found keeps its grid steps
+    monkeypatch.setattr(plan_module.SpeedChoice, "shortcut", lambda self, land, f, keep, **kw: f)  # the way found keeps its grid steps
     monkeypatch.setattr(plan_module.SpeedChoice, "relax", lambda self, land, f, keep, *a, **kw: f)
     fc = forecast(wind_u=-10.0, Hs=2.0, wave_from_x=1.0, T_m10=8.0)
     fc.fields["wind_u"][1] = 10.0

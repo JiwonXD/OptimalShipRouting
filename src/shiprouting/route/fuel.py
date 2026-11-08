@@ -19,6 +19,7 @@ rate depends only on the total resistance, so it is read from a table of the
 ship model over resistance; wave added resistance comes from a table too.
 """
 
+import functools
 import time
 from dataclasses import dataclass, field
 
@@ -57,8 +58,8 @@ class FuelCost:
     seconds: float = 0.0  # spent computing fuel
     _args: tuple | None = field(default=None, repr=False)  # for kernel.fuel_kg, this speed alone
 
-    @property
-    def calm_kg_per_km(self) -> float:
+    @functools.cached_property
+    def calm_kg_per_km(self) -> float:  # cached: the propeller's operating point is solved in Python
         return self.ship.fuel_rate(self.speed) / (self.speed * 3.6)
 
     def _tables(self) -> tuple:

@@ -21,7 +21,7 @@ from shiprouting.route import kernel
 from shiprouting.route.fuel import KNOT, FuelCost, fuel_kg, stacked_tables
 from shiprouting.sea.latlon import SearchResult, haversine_km
 from shiprouting.sea.land import Land
-from shiprouting.sea.quadtree import Graph, along, arcs_on_land, astar, join_legs, trace
+from shiprouting.sea.quadtree import Graph, OpenWater, along, arcs_on_land, astar, join_legs, trace
 
 
 @dataclass
@@ -35,6 +35,23 @@ class SpeedChoice:
         if self._args is None:
             self._args = stacked_tables(self.costs)
         return fuel_kg(self.costs, self._args, lat_a, lon_a, lat_b, lon_b, hours)
+
+    def kg_hours_at(self, lat_a, lon_a, lat_b, lon_b, hours, at) -> tuple[np.ndarray, np.ndarray]:
+        """kg_hours of each move at its own speed index `at` only, 1-D: kg_hours(...)[:, at[m], m]."""
+        if self._args is None:
+            self._args = stacked_tables(self.costs)
+        t0 = time.perf_counter()
+        moves = np.broadcast_arrays(*(np.asarray(v, np.float64) for v in (lat_a, lon_a, lat_b, lon_b, hours)), np.asarray(at, np.int64))
+        moves = [np.ascontiguousarray(v).ravel() for v in moves]
+        out, out_h, counts = np.empty(moves[0].size), np.empty(moves[0].size), np.zeros((len(self.costs), 3), np.int64)
+        kernel.fuel_kg_at(*moves, out, out_h, counts, *self._args)
+        seconds = (time.perf_counter() - t0) / len(self.costs)
+        for c, m in zip(self.costs, counts):
+            c.no_waves += int(m[0])
+            c.over_mcr += int(m[1])
+            c.beyond_forecast += int(m[2])
+            c.seconds += seconds
+        return out, out_h
 
     def kg(self, lat_a, lon_a, lat_b, lon_b, hours=0.0) -> np.ndarray:
         """FuelCost.kg at every speed in one pass, shape (speeds, *moves)."""
@@ -162,7 +179,8 @@ class SpeedChoice:
         arrives no later: a path smoothed after the search has segments sailed at no offered speed."""
         return dataclasses.replace(r, clock=self.sail(r, self.speed_index(r))[0])
 
-    def shortcut(self, land: Land, r: SearchResult, keep_points=(), piece_km: float = 20.0, step: float = 1.5) -> SearchResult:
+    def shortcut(self, land: Land, r: SearchResult, keep_points=(), piece_km: float = 20.0, step: float = 1.5,
+                 open_sea: OpenWater | None = None) -> SearchResult:
         """Cut the grid's steps out of a path found with edge_cost, keeping the way the weather chose.
 
         The cells only join in eight directions, so a found path runs in steps even across open
@@ -172,6 +190,7 @@ class SpeedChoice:
         burns no more fuel. An arc through weather the path went round costs more and is not
         taken. Arcs are cut into pieces of piece_km at most, each timed as the path's stretch
         is, in proportion to distance. Links, the two ends and the points at keep_points stay.
+        Given open_sea (quadtree.open_water), arcs it shows to miss land are not looked up: the same answers, faster.
         """
         n = len(r.lat) - 1
         lat, lon = r.lat, np.degrees(np.unwrap(np.radians(r.lon)))
@@ -189,7 +208,7 @@ class SpeedChoice:
             if not r.on_link[i]:
                 stop = i + 1 + int(np.argmax(fixed[i + 1 :]))
                 cand = np.unique(np.r_[np.minimum(i + np.ceil(step ** np.arange(64)).astype(int), stop), stop])
-                cand = cand[~arcs_on_land(land, lat[i], lon[i], lat[cand], lon[cand])][::-1]
+                cand = cand[~arcs_on_land(land, lat[i], lon[i], lat[cand], lon[cand], open_sea=open_sea)][::-1]
                 for c in cand[cand > i + 1]:
                     km = float(haversine_km(lat[i], lon[i], lat[c], lon[c]))
                     f = np.arange(int(np.ceil(km / piece_km)) + 1) / int(np.ceil(km / piece_km))
@@ -216,7 +235,7 @@ class SpeedChoice:
         return dataclasses.replace(r, lat=p_lat, lon=p_lon, on_link=np.array(on_link, bool), km=km, clock=np.array(clock))
 
     def relax(self, land: Land, r: SearchResult, keep_points=(), step_km: float = 16.0, min_km: float = 0.25,
-              max_sweeps: int = 400) -> SearchResult:
+              max_sweeps: int = 400, open_sea: OpenWater | None = None) -> SearchResult:
         """Move a path's points sideways where that is cheaper, off the grid's eight directions.
 
         The cells only join in eight directions, and cutting corners (shortcut) keeps to the way
@@ -226,6 +245,7 @@ class SpeedChoice:
         then arrive no later and burn no more fuel, one of them strictly, and miss land. Odd and
         even points take turns, so each move is judged against fixed neighbours. When a sweep
         keeps nothing the step is halved, down to min_km. Links, the two ends and keep_points stay.
+        open_sea as in shortcut.
         """
         n = len(r.lat) - 1
         if n < 2:
@@ -243,10 +263,9 @@ class SpeedChoice:
 
         def pair(la, lo, i):
             """Fuel and hours of segments i-1 and i, through the points (la, lo) in place of point i."""
-            kg1, h1 = self.kg_hours(lat[i - 1], lon[i - 1], la, lo, clock[i - 1])
-            kg1, h1 = kg1[k[i - 1], np.arange(len(i))], h1[k[i - 1], np.arange(len(i))]
-            kg2, h2 = self.kg_hours(la, lo, lat[i + 1], lon[i + 1], clock[i - 1] + h1)
-            return kg1 + kg2[k[i], np.arange(len(i))], h1 + h2[k[i], np.arange(len(i))]
+            kg1, h1 = self.kg_hours_at(lat[i - 1], lon[i - 1], la, lo, clock[i - 1], k[i - 1])
+            kg2, h2 = self.kg_hours_at(la, lo, lat[i + 1], lon[i + 1], clock[i - 1] + h1, k[i])
+            return kg1 + kg2, h1 + h2
 
         step, sweeps = step_km, 0
         while step >= min_km and sweeps < max_sweeps:
@@ -273,16 +292,17 @@ class SpeedChoice:
                               & np.isfinite(kg1))
                     if better.any():
                         j = np.nonzero(better)[0]
-                        ok = ~(arcs_on_land(land, lat[i[j] - 1], lon[i[j] - 1], q_lat[j], q_lon[j])
-                               | arcs_on_land(land, q_lat[j], q_lon[j], lat[i[j] + 1], lon[i[j] + 1]))
+                        ok = ~(arcs_on_land(land, lat[i[j] - 1], lon[i[j] - 1], q_lat[j], q_lon[j], open_sea=open_sea)
+                               | arcs_on_land(land, q_lat[j], q_lon[j], lat[i[j] + 1], lon[i[j] + 1], open_sea=open_sea))
                         j = j[ok]
                         lat[i[j]], lon[i[j]] = q_lat[j], q_lon[j]
                         kg0[j], h0[j] = kg1[j], h1[j]
                         best[j] = True
                 moved += int(best.sum())
-                path = dataclasses.replace(r, lat=lat, lon=lon)
-                _, h = self.segments(path, clock[:-1])
-                clock = clock[0] + np.r_[0.0, np.cumsum(h[k, np.arange(n)])]
+                h = haversine_km(lat[:-1], lon[:-1], lat[1:], lon[1:]) / np.array([c.speed * 3.6 for c in self.costs])[k]
+                a = np.nonzero(~r.on_link)[0]
+                h[a] = self.kg_hours_at(lat[a], lon[a], lat[a + 1], lon[a + 1], clock[a], k[a])[1]  # segments(...)[1][k, :]
+                clock = clock[0] + np.r_[0.0, np.cumsum(h)]
             if moved == 0:
                 step /= 2
         lon = (lon + 180) % 360 - 180

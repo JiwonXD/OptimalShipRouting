@@ -183,6 +183,46 @@ def test_one_move_at_many_times_matches_the_moves_one_by_one(currents):
     np.testing.assert_allclose(h2, h, rtol=1e-12)
 
 
+@pytest.mark.parametrize("currents", [False, True])
+def test_moves_at_their_own_speed_match_every_speed_picked(currents):
+    sc = _varied_choice(currents)
+    rng = np.random.default_rng(3)
+    lat_a, lon_a = rng.uniform(-9, 9, 500), rng.uniform(141, 159, 500)
+    lat_b, lon_b = lat_a + rng.uniform(-0.5, 0.5, 500), lon_a + rng.uniform(-0.5, 0.5, 500)
+    hours, at = rng.uniform(0.0, 25.0, 500), rng.integers(0, 3, 500)  # past the forecast's end too
+    kg, h = sc.kg_hours(lat_a, lon_a, lat_b, lon_b, hours)
+    kg1, h1 = sc.kg_hours_at(lat_a, lon_a, lat_b, lon_b, hours, at)
+    assert np.array_equal(kg1, kg[at, np.arange(500)]) and np.array_equal(h1, h[at, np.arange(500)])
+
+
+@pytest.mark.parametrize("currents", [False, True])
+def test_relax_at_one_speed_per_segment_moves_the_points_as_before(currents, monkeypatch):
+    from shiprouting.sea.latlon import SearchResult
+
+    sc = _varied_choice(currents)
+    lat = np.linspace(-6.0, 4.0, 41) + np.where(np.arange(41) % 2, 0.3, -0.3)
+    lon = np.linspace(142.0, 157.0, 41)
+    on_link = np.zeros(40, bool)
+    on_link[20] = True
+    k = np.random.default_rng(5).integers(0, 3, 40)
+    r = SearchResult(lat, lon, on_link, [], 0.0, 0, 0.0, clock=np.zeros(41))
+    r = dataclasses.replace(r, clock=sc.sail(r, k)[0])
+    land = Land([shapely.box(150.0, 2.0, 151.0, 3.0)])
+    out = sc.relax(land, r, keep_points=(10,))
+
+    def every_speed_picked(self, lat_a, lon_a, lat_b, lon_b, hours, at):
+        kg, h = self.kg_hours(lat_a, lon_a, lat_b, lon_b, hours)
+        m = np.arange(kg.shape[1])
+        return kg[at, m], h[at, m]
+
+    monkeypatch.setattr(SpeedChoice, "kg_hours_at", every_speed_picked)
+    ref = sc.relax(land, r, keep_points=(10,))
+    assert not np.array_equal(ref.lat, r.lat)  # it did move points
+    for name in ("lat", "lon", "clock"):
+        assert np.array_equal(getattr(out, name), getattr(ref, name))
+    assert out.cost == ref.cost
+
+
 def _retime_reference(sc, r, eta_hours, dt_hours=0.02, max_current=2.5, per_hour=0.0):
     """SpeedChoice.retime as it was before its inner loop was compiled (kept to check against)."""
     from shiprouting.sea.latlon import haversine_km
@@ -242,3 +282,21 @@ def test_compiled_search_finds_what_astar_finds(currents, price):
     assert np.array_equal(got.lat, want.lat) and np.array_equal(got.lon, want.lon) and np.array_equal(got.on_link, want.on_link)
     assert np.array_equal(got.clock, want.clock)
     assert got.cost == want.cost and got.expanded == want.expanded
+
+
+def test_shortcut_and_relax_judge_land_the_same_with_open_water_skipped():
+    from shiprouting.sea.quadtree import open_water
+
+    sc = _varied_choice(False)
+    land = Land([shapely.box(147.0, -2.0, 148.0, 2.0), shapely.box(152.0, -3.0, 152.5, 3.0)])
+    graph = Graph.build(land, root=1.0, min_step=0.25, lat_limits=(-20.0, 20.0))
+    open_sea = open_water(graph, land)
+    assert open_sea.safe.any() and not open_sea.safe.all()
+    r = astar(graph, graph.nearest(-0.2, 143.0), graph.nearest(0.3, 157.0))  # round both islands
+    k = np.random.default_rng(2).integers(0, 3, len(r.lat) - 1)
+    r = dataclasses.replace(r, clock=sc.sail(r, k)[0])
+    for way in (sc.shortcut, sc.relax):
+        a, b = way(land, r, (), open_sea=open_sea), way(land, r, ())
+        for name in ("lat", "lon", "clock", "on_link"):
+            assert np.array_equal(getattr(a, name), getattr(b, name))
+        assert a.cost == b.cost

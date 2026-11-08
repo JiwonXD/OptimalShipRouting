@@ -239,6 +239,36 @@ def fuel_kg_times(
                 counts[s, c] += tally[m, s, c]
 
 
+@numba.njit(cache=True, parallel=True)
+def fuel_kg_at(
+    lat_a, lon_a, lat_b, lon_b, hours, at, out, out_h, counts,  # moves, each at speed index at[m]; out (moves,)
+    t0, frozen, speed, R_hull, wind_deg, C_DA, A_XV, rho_air, T01_grid, angle_grid, per_Hs2, R_grid, kg_h,
+    lat_grid, lon_grid, t_grid, wind_u, wind_v, Hs_f, from_x, from_y, T_m10, current_u, current_v, currents,
+):
+    """fuel_kg at one speed per move, the moves spread over the cores: out[m] is fuel_kg's out[at[m], m]."""
+    n = len(lat_a)
+    tally = np.zeros((n, len(speed), 3), np.int64)  # counts per move, added up after the threads are done
+    for m in numba.prange(n):
+        s = at[m]
+        km, lat, lon, heading = _geometry(lat_a[m], lon_a[m], lat_b[m], lon_b[m])
+        t = _when(s, t0, frozen, hours[m], km, speed, t_grid, tally[m])
+        cu = cv = math.nan
+        if currents:
+            cu = sample(current_u, lat_grid, lon_grid, t_grid, lat, lon, t)
+            cv = sample(current_v, lat_grid, lon_grid, t_grid, lat, lon, t)
+        out[m], out_h[m] = _move(
+            s, km, heading, cu, cv,
+            sample(wind_u, lat_grid, lon_grid, t_grid, lat, lon, t), sample(wind_v, lat_grid, lon_grid, t_grid, lat, lon, t),
+            sample(Hs_f, lat_grid, lon_grid, t_grid, lat, lon, t), sample(T_m10, lat_grid, lon_grid, t_grid, lat, lon, t),
+            sample(from_x, lat_grid, lon_grid, t_grid, lat, lon, t), sample(from_y, lat_grid, lon_grid, t_grid, lat, lon, t),
+            tally[m], speed, R_hull, wind_deg, C_DA, A_XV, rho_air, T01_grid, angle_grid, per_Hs2, R_grid, kg_h,
+        )  # fmt: skip
+    for m in range(n):
+        for s in range(len(speed)):
+            for c in range(3):
+                counts[s, c] += tally[m, s, c]
+
+
 @numba.njit(cache=True)
 def prune(t, f, kg, h, left_h, end, dt_hours, price):
     """One segment of SpeedChoice.retime: every label (t, f) going on at every speed (kg, h of
