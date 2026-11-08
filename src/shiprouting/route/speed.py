@@ -17,6 +17,7 @@ from dataclasses import dataclass, field
 
 import numpy as np
 
+from shiprouting.route import kernel
 from shiprouting.route.fuel import KNOT, FuelCost, fuel_kg, stacked_tables
 from shiprouting.sea.latlon import SearchResult, haversine_km
 from shiprouting.sea.land import Land
@@ -252,28 +253,26 @@ class SpeedChoice:
         left_h = np.r_[np.cumsum(seg_km[::-1])[::-1], 0.0] / ((speed.max() + max_current) * 3.6)
         end = r.clock[0] + eta_hours * (1 + 1e-9)
         price = self.per_hour if per_hour is None else per_hour
-        t, f = np.array([r.clock[0]]), np.array([0.0])
+        if self._args is None:
+            self._args = stacked_tables(self.costs)
+        counts = np.zeros((len(speed), 3), np.int64)
+        t, f = np.array([float(r.clock[0])]), np.array([0.0])
         layers = []  # per segment: parent label and speed index of each label kept
         for i in range(n):
             if r.on_link[i]:
-                kg = np.broadcast_to((seg_km[i] * calm)[:, None], (len(speed), len(t)))
-                h = np.broadcast_to((seg_km[i] / (speed * 3.6))[:, None], (len(speed), len(t)))
+                kg = np.repeat((seg_km[i] * calm)[:, None], len(t), axis=1)
+                h = np.repeat((seg_km[i] / (speed * 3.6))[:, None], len(t), axis=1)
             else:
-                kg, h = self.kg_hours(r.lat[i], r.lon[i], r.lat[i + 1], r.lon[i + 1], t)
-            t2, f2 = (t[None] + h).ravel(), (f[None] + kg).ravel()
-            k2 = np.repeat(np.arange(len(speed)), len(t))
-            p2 = np.tile(np.arange(len(t)), len(speed))
-            ok = np.isfinite(f2) & (t2 + left_h[i + 1] <= end)
-            t2, f2, k2, p2 = t2[ok], f2[ok], k2[ok], p2[ok]
-            if not len(t2):
+                kg, h = np.empty((len(speed), len(t))), np.empty((len(speed), len(t)))
+                kernel.fuel_kg_times(float(r.lat[i]), float(r.lon[i]), float(r.lat[i + 1]), float(r.lon[i + 1]), t, kg, h, counts, *self._args)
+            t, f, parent, ks = kernel.prune(t, f, kg, h, float(left_h[i + 1]), float(end), float(dt_hours), float(price))
+            if not len(t):
                 raise ValueError(f"no speeds on this way arrive within {eta_hours:g} h")
-            bucket = np.floor(t2 / dt_hours)
-            keep = np.zeros(len(t2), bool)
-            for value in (f2, f2 + price * t2):  # in each bucket, the least fuel and the least fuel + price × hours
-                order = np.lexsort((t2, value, bucket))
-                keep[order[np.r_[True, bucket[order][1:] != bucket[order][:-1]]]] = True
-            t, f = t2[keep], f2[keep]
-            layers.append((p2[keep], k2[keep]))
+            layers.append((parent, ks))
+        for c, m in zip(self.costs, counts):
+            c.no_waves += int(m[0])
+            c.over_mcr += int(m[1])
+            c.beyond_forecast += int(m[2])
         best = int(np.argmin(f))
         k = np.empty(n, int)
         for i in range(n - 1, -1, -1):
