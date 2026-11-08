@@ -216,15 +216,19 @@ def plan(graph: Graph, ship: Ship, forecast: Forecast, start, goal, departure, d
         return f
 
     kept, f = f, None if f is None else finish(f)
+    out["kept_t"] = None if f is None else round(f.cost / 1000, 2)  # the way the price search kept, finished
     if ways is not None:  # finished, a way searched at another price, even one that arrived late, may burn less: keep the cheapest
         # The same cells at other speeds count as another way: shortcut and relax judge each move at its speed.
-        out["ways_t"], seen = [], [] if kept is None else [(kept.lat, kept.lon, choice.speed_index(kept))]
-        for w in ways:
+        out["ways_t"], seen = [], [] if kept is None else [(kept.lat, kept.lon, choice.speed_index(kept), "kept")]
+        out["ways_same_as"] = []  # per way: None, or the earlier way ("kept" or its index) it repeats
+        for i, w in enumerate(ways):
             k = choice.speed_index(w)
-            if any(np.array_equal(w.lat, a) and np.array_equal(w.lon, b) and np.array_equal(k, c) for a, b, c in seen):
+            same = next((n for a, b, c, n in seen if np.array_equal(w.lat, a) and np.array_equal(w.lon, b) and np.array_equal(k, c)), None)
+            out["ways_same_as"].append(same)
+            if same is not None:
                 out["ways_t"].append(None)
                 continue
-            seen.append((w.lat, w.lon, k))
+            seen.append((w.lat, w.lon, k, i))
             g = finish(w, slack=False)
             out["ways_t"].append(None if g is None else round(g.cost / 1000, 2))
             if g is not None and (f is None or g.cost < f.cost):
@@ -237,11 +241,14 @@ def plan(graph: Graph, ship: Ship, forecast: Forecast, start, goal, departure, d
         s = dataclasses.replace(r, clock=clock, cost=fuel)
         # and so may the shortest route moved sideways where the weather makes that cheaper: the
         # search on the cells' steps need not come near it
+        out["shortest_finished_t"] = []  # the shortest route, then it moved sideways: speeds chosen again
         for way, kept in ((s, True), *(((choice.snap_up(choice.relax(land, s, waypoints(s), open_sea=open_sea)), False),) if land is not None else ())):
             try:
                 g = choice.retime(way, hours, per_hour=price)
             except ValueError:
+                out["shortest_finished_t"].append(None)
                 continue
+            out["shortest_finished_t"].append(round(g.cost / 1000, 2))
             if g.cost < f.cost:
                 f, on_shortest = g, kept
     out["least_fuel"] = describe(f, f.cost, choice.speeds_kn(f), float(f.clock[-1] - f.clock[0]), time.perf_counter() - t0)
