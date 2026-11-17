@@ -1,0 +1,23 @@
+{
+  "about": "Pre-registered scenario matrix (docs/experiment-plan.md). Do not change after a run has started; if it must change, say why in the plan.",
+  "ports": {
+    "busan": [35.08, 129.08],
+    "la": [33.72, -118.27],
+    "rotterdam": [51.95, 4.05],
+    "newyork": [40.6, -74.0],
+    "singapore": [1.26, 103.84]
+  },
+  "routes": {
+    "busan_la": {"start": "busan", "goal": "la", "hours": 372},
+    "la_busan": {"start": "la", "goal": "busan", "hours": 372},
+    "busan_rotterdam": {"start": "busan", "goal": "rotterdam", "hours": 732},
+    "rotterdam_newyork": {"start": "rotterdam", "goal": "newyork", "hours": 228},
+    "newyork_rotterdam": {"start": "newyork", "goal": "rotterdam", "hours": 228},
+    "singapore_rotterdam": {"start": "singapore", "goal": "rotterdam", "hours": 564}
+  },
+  "seasons": {
+    "summer": {"runs": "data/weather/ecmwf", "first": "2026-08-25T12:00", "every_days": 3, "count": 10},
+    "winter": {"runs": "data/weather/ecmwf_winter", "first": "2025-12-02T12:00", "every_days": 3, "count": 10}
+  },
+  "strategies": {"daily": 24, "once": 0}
+}

@@ -10,15 +10,17 @@ the path it finds is then straightened by cutting corners where the straight
 line misses land.
 """
 
+import dataclasses
 import heapq
 import math
 import time
 from dataclasses import dataclass
 
+import numba
 import numpy as np
 import shapely
-from scipy.sparse import coo_matrix
-from scipy.sparse.csgraph import connected_components
+from scipy.sparse import coo_matrix, csr_matrix
+from scipy.sparse.csgraph import connected_components, dijkstra
 
 from shiprouting.sea.land import Land
 from shiprouting.sea.latlon import CHECKPOINTS, ICE_FREE, ROUTES, SearchResult, haversine_km, segments_on_land, turn_deg
@@ -220,7 +222,12 @@ def astar(
                 heapq.heappush(open_list, (cost + h(n), n))
     else:
         raise ValueError(f"no route ({expanded} cells expanded)")
+    return trace(graph, s, g, parent, clock, best[g], expanded, time.perf_counter() - t0)
 
+
+def trace(graph: Graph, s: int, g: int, parent, clock, cost: float, expanded: int, seconds: float) -> SearchResult:
+    """The path a search found, read back from g: parent[n] is (node, link, reversed) or None at s,
+    clock[n] the clock on reaching n."""
     nodes, via = [g], []  # from goal back to start, each with the link that led into it
     while parent[nodes[-1]] is not None:
         c, link, rev = parent[nodes[-1]]
@@ -244,7 +251,194 @@ def astar(
         on_link.append(False)
     lat, lon = np.array(lat), np.array(lon)
     km = float(haversine_km(lat[:-1], lon[:-1], lat[1:], lon[1:]).sum())
-    return SearchResult(lat, lon, np.array(on_link, bool), used, km, expanded, time.perf_counter() - t0, best[g], np.array(at))
+    return SearchResult(lat, lon, np.array(on_link, bool), used, km, expanded, seconds, cost, np.array(at))
+
+
+def any_angle(
+    land: Land, graph: Graph, s: int, g: int, max_seconds: float = math.inf, steps_over: float = 1.1
+) -> SearchResult:
+    """The shortest path from node s to node g, not held to the graph's edges (Lazy Theta*).
+
+    A cell may take as its parent any cell the great-circle arc from which misses land, not
+    only its neighbours, so the length the search compares is that of arcs, as the path is
+    sailed, rather than of steps between cell centres. astar compares the steps, which near a
+    coast zigzag between small cells and can make the shorter way look the longer one; cutting
+    the corners afterwards (straighten) cannot change the way. Links are taken as astar takes
+    them, and no arc skips one. The clock is the km sailed.
+
+    Most arcs cross open ocean, so arcs_on_land skips the land lookup for its pieces that run
+    only through root cells whose eight neighbours, like themselves, are whole cells of water
+    (and deep, with shallow water as land); an arc is judged as arcs_on_land judges it.
+
+    The distance still to go is guessed from the steps between cells: their shortest distance
+    to g (one Dijkstra from g, links included) over `steps_over`, how much longer the steps are
+    than arcs at most, or the great-circle distance if that is longer. On the steps a way round
+    a continent is known to be long from the start, where the great-circle distance would have
+    the search spread over all the water nearer the goal as the crow flies first.
+    """
+    t0 = time.perf_counter()
+    open_sea = open_water(graph, land)
+    jumps = {}  # node -> [(node, km, link, reversed)]
+    ends = []
+    for a, b, link in graph.links:
+        km = (
+            float(haversine_km(graph.lat[a], graph.lon[a], link.lat[0], link.lon[0]))
+            + link.km
+            + float(haversine_km(graph.lat[b], graph.lon[b], link.lat[-1], link.lon[-1]))
+        )
+        jumps.setdefault(a, []).append((b, km, link, False))
+        jumps.setdefault(b, []).append((a, km, link, True))
+        ends += [(a, b, km), (b, a, km)]
+    n = len(graph.lat)
+    a, b, w = (np.array(v) for v in zip(*ends)) if ends else (np.zeros(0, int), np.zeros(0, int), np.zeros(0))
+    steps = csr_matrix((graph.km, graph.indices, graph.indptr), shape=(n, n)) + csr_matrix((w, (a, b)), shape=(n, n))
+    to_go = dijkstra(steps, indices=g) / steps_over
+
+    def km(a, b):
+        return haversine_km(graph.lat[a], graph.lon[a], graph.lat[b], graph.lon[b])
+
+    def h(n) -> float:
+        return max(float(km(n, g)), float(to_go[n]))
+
+    best = {s: 0.0}
+    parent = {s: None}  # (node, link, reversed)
+    closed = set()
+    open_list = [(h(s), s)]
+    expanded = 0
+    while open_list:
+        _, c = heapq.heappop(open_list)
+        if c in closed:
+            continue
+        lo, hi = graph.indptr[c], graph.indptr[c + 1]
+        p = parent[c]
+        # Pushed as seen from its parent's parent without looking: look now; if land is in the
+        # way, take the best neighbour already done, as astar would.
+        if (
+            p is not None
+            and p[1] is None
+            and p[0] not in graph.indices[lo:hi]
+            and not open_sea.clear(land, graph.lat[p[0]], graph.lon[p[0]], graph.lat[c], graph.lon[c])
+        ):
+            done = [(best[int(n)] + float(k), int(n)) for n, k in zip(graph.indices[lo:hi], graph.km[lo:hi]) if int(n) in closed]
+            best[c], n = min(done)
+            parent[c] = (n, None, False)
+        closed.add(c)
+        expanded += 1
+        if c == g:
+            break
+        if time.perf_counter() - t0 > max_seconds:
+            raise TimeoutError(f"stopped after {max_seconds:g} s ({expanded} cells expanded)")
+        # From c's own parent when c was reached across open water, else from c.
+        b = parent[c][0] if parent[c] is not None and parent[c][1] is None else c
+        ns = graph.indices[lo:hi]
+        costs = best[b] + km(b, ns)
+        moves = [(int(n), float(w), b, None, False) for n, w in zip(ns, costs)]
+        moves += [(n, best[c] + k, c, link, rev) for n, k, link, rev in jumps.get(c, [])]
+        for n, cost, via, link, rev in moves:
+            if n not in closed and cost < best.get(n, math.inf):
+                best[n] = cost
+                parent[n] = (via, link, rev)
+                heapq.heappush(open_list, (cost + h(n), n))
+    else:
+        raise ValueError(f"no route ({expanded} cells expanded)")
+
+    nodes, via = [g], []
+    while parent[nodes[-1]] is not None:
+        c, link, rev = parent[nodes[-1]]
+        via.append((link, rev))
+        nodes.append(c)
+    lat, lon, on_link, used = [graph.lat[s]], [graph.lon[s]], [], []
+    for n, (link, rev) in zip(reversed(nodes[:-1]), reversed(via)):
+        if link is not None:
+            pts_lat, pts_lon = (link.lat[::-1], link.lon[::-1]) if rev else (link.lat, link.lon)
+            lat += list(pts_lat)
+            lon += list(pts_lon)
+            on_link += [False] + [True] * (len(pts_lat) - 1)
+            used.append(link.name)
+        lat.append(graph.lat[n])
+        lon.append(graph.lon[n])
+        on_link.append(False)
+    lat, lon = np.array(lat), np.array(lon)
+    clock = np.r_[0.0, np.cumsum(haversine_km(lat[:-1], lon[:-1], lat[1:], lon[1:]))]
+    return SearchResult(lat, lon, np.array(on_link, bool), used, float(clock[-1]), expanded, time.perf_counter() - t0,
+                        float(clock[-1]), clock)
+
+
+@dataclass(frozen=True)
+class OpenWater:
+    """Root cells that hold no land and neither do their eight neighbours."""
+
+    safe: np.ndarray  # [row, column] of the root grid
+    lat0: float  # south side of row 0
+    root: float
+
+    def clear(self, land: Land, lat0: float, lon0: float, lat1: float, lon1: float) -> bool:
+        """Whether the great-circle arc misses land, as arcs_on_land judges it (same pieces)."""
+        n = max(1, math.ceil(float(haversine_km(lat0, lon0, lat1, lon1)) / 20.0))
+        lat, lon = _along_n(float(lat0), float(lon0), float(lat1), float(lon1), n)
+        look = ~_open_pieces(self.safe, self.lat0, self.root, lat[:-1], lon[:-1], lat[1:], lon[1:])
+        return not (look.any() and _pieces_on_land(land, lat[:-1], lon[:-1], lat[1:], lon[1:], look).any())
+
+
+@numba.njit(cache=True)
+def _along_n(lat0, lon0, lat1, lon1, n):
+    """along() at the fractions 0, 1/n, ..., 1, for one arc."""
+    d = math.pi / 180
+    p0, l0, p1, l1 = lat0 * d, lon0 * d, lat1 * d, lon1 * d
+    x0, y0, z0 = math.cos(p0) * math.cos(l0), math.cos(p0) * math.sin(l0), math.sin(p0)
+    x1, y1, z1 = math.cos(p1) * math.cos(l1), math.cos(p1) * math.sin(l1), math.sin(p1)
+    omega = math.acos(min(1.0, max(-1.0, x0 * x1 + y0 * y1 + z0 * z1)))
+    lat, lon = np.empty(n + 1), np.empty(n + 1)
+    for k in range(n + 1):
+        f = k / n
+        if omega > 1e-12:
+            w0, w1 = math.sin((1 - f) * omega) / math.sin(omega), math.sin(f * omega) / math.sin(omega)
+        else:
+            w0, w1 = 1 - f, f
+        x, y, z = w0 * x0 + w1 * x1, w0 * y0 + w1 * y1, w0 * z0 + w1 * z1
+        lat[k], lon[k] = math.atan2(z, math.hypot(x, y)) / d, math.atan2(y, x) / d
+    return lat, lon
+
+
+@numba.njit(cache=True)
+def _open_pieces(safe, lat_south, root, a_lat, a_lon, b_lat, b_lon):
+    """Whether each straight lon/lat piece is known to miss land: points along it no more than
+    half a root cell apart all lie in safe cells, so the piece stays within their neighbours."""
+    rows, cols = safe.shape
+    out = np.empty(len(a_lat), np.bool_)
+    for p in range(len(a_lat)):
+        d_lat, d_lon = b_lat[p] - a_lat[p], b_lon[p] - a_lon[p]
+        m = max(1, math.ceil(max(abs(d_lat), abs(d_lon)) / (0.5 * root)))
+        ok = True
+        for k in range(m + 1):
+            i = math.floor((a_lat[p] + k / m * d_lat - lat_south) / root)
+            j = math.floor((a_lon[p] + k / m * d_lon + 180) / root) % cols
+            if not (0 <= i < rows and safe[i, j]):
+                ok = False
+                break
+        out[p] = ok
+    return out
+
+
+def open_water(graph: Graph, land=None) -> OpenWater:
+    """The graph's root cells (the largest) are whole cells of water: a cell with land in it was
+    split or left out. Over shallow water (land a depth.LandOrShallow) only cells wholly deeper
+    than its limit count."""
+    root = float(graph.size.max())
+    whole = graph.size >= root * (1 - 1e-9)
+    lat0 = float((graph.lat[whole] - root / 2).min())
+    i = np.rint((graph.lat[whole] - root / 2 - lat0) / root).astype(int)
+    j = np.rint((graph.lon[whole] - root / 2 + 180) / root).astype(int) % round(360 / root)
+    free = np.zeros((i.max() + 3, round(360 / root)), bool)  # a row of land above and below
+    free[i + 1, j] = True
+    if hasattr(land, "deep"):
+        free[1:-1] &= land.deep(root, lat0, free.shape[0] - 2)
+    safe = free.copy()
+    for di in (-1, 0, 1):
+        for dj in (-1, 0, 1):
+            safe &= np.roll(np.roll(free, di, axis=0), dj, axis=1)
+    safe[[0, -1]] = False
+    return OpenWater(safe[1:-1], lat0, root)
 
 
 def join_legs(legs: list[SearchResult]) -> SearchResult:
@@ -305,6 +499,60 @@ def straighten(land: Land, r: SearchResult, clearance_km: float = 0.0, piece_km:
     clock = np.r_[0.0, np.cumsum(haversine_km(lat[:-1], lon[:-1], lat[1:], lon[1:]))]
     return SearchResult(lat, lon, on_link, r.links, float(clock[-1]), r.expanded, time.perf_counter() - t0,
                         float(clock[-1]), clock)
+
+
+def tighten(land: Land, r: SearchResult, keep_points=(), step_km: float = 16.0, min_km: float = 0.25,
+            max_sweeps: int = 400) -> SearchResult:
+    """Pull a path taut: move each point sideways where that shortens the two arcs it joins and
+    they still miss land, as SpeedChoice.relax moves points for fuel. The search's turning points
+    are cell centres, so a path bending round a coast keeps some way off it; straighten cuts only
+    to the points the path already has. Odd and even points take turns; when a sweep moves
+    nothing the step is halved, down to min_km. Links, the two ends and keep_points stay. The
+    clock (and cost) is the distance."""
+    n = len(r.lat) - 1
+    lat, lon = r.lat.copy(), np.degrees(np.unwrap(np.radians(r.lon)))
+    fixed = np.zeros(n + 1, bool)
+    fixed[[0, -1, *keep_points]] = True
+    fixed[:-1] |= r.on_link
+    fixed[1:] |= r.on_link
+
+    def unit(la, lo):
+        p, q = np.radians(la), np.radians(lo)
+        return np.stack([np.cos(p) * np.cos(q), np.cos(p) * np.sin(q), np.sin(p)])
+
+    step, sweeps = step_km, 0
+    while n >= 2 and step >= min_km and sweeps < max_sweeps:
+        sweeps += 1
+        moved = 0
+        for parity in (1, 2):
+            i = np.arange(parity, n, 2)
+            i = i[~fixed[i]]
+            if not len(i):
+                continue
+            d0 = haversine_km(lat[i - 1], lon[i - 1], lat[i], lon[i]) + haversine_km(lat[i], lon[i], lat[i + 1], lon[i + 1])
+            a, b, p = unit(lat[i - 1], lon[i - 1]), unit(lat[i + 1], lon[i + 1]), unit(lat[i], lon[i])
+            side = np.cross(a, b, axis=0)
+            side /= np.maximum(np.linalg.norm(side, axis=0), 1e-15)
+            done = np.zeros(len(i), bool)
+            for sign in (1.0, -1.0):
+                d = sign * step / 6371.0088
+                q = np.cos(d) * p + np.sin(d) * side
+                q_lat = np.degrees(np.arctan2(q[2], np.hypot(q[0], q[1])))
+                q_lon = lon[i] + (np.degrees(np.arctan2(q[1], q[0])) - lon[i] + 180) % 360 - 180
+                d1 = haversine_km(lat[i - 1], lon[i - 1], q_lat, q_lon) + haversine_km(q_lat, q_lon, lat[i + 1], lon[i + 1])
+                j = np.nonzero((d1 < d0 * (1 - 1e-12)) & ~done)[0]
+                if len(j):
+                    ok = ~(arcs_on_land(land, lat[i[j] - 1], lon[i[j] - 1], q_lat[j], q_lon[j])
+                           | arcs_on_land(land, q_lat[j], q_lon[j], lat[i[j] + 1], lon[i[j] + 1]))
+                    j = j[ok]
+                    lat[i[j]], lon[i[j]] = q_lat[j], q_lon[j]
+                    d0[j], done[j] = d1[j], True
+            moved += int(done.sum())
+        if moved == 0:
+            step /= 2
+    lon = (lon + 180) % 360 - 180
+    clock = np.r_[0.0, np.cumsum(haversine_km(lat[:-1], lon[:-1], lat[1:], lon[1:]))]
+    return dataclasses.replace(r, lat=lat, lon=lon, km=float(clock[-1]), cost=float(clock[-1]), clock=clock)
 
 
 def smooth_turns(land: Land, r: SearchResult, sharp: float = 60.0, reach: int = 4, keep_points=()) -> SearchResult:
@@ -392,31 +640,47 @@ def cut_corners(land: Land, lat, lon, fixed, seg_link, clock, sharp: float = 60.
             clock = np.r_[clock[:k], ca, cb, clock[k + 1:]]
     return lat, lon, seg_link, clock
 
-def arcs_on_land(land: Land, lat0, lon0, lat1, lon1, piece_km: float = 20.0, clearance_km: float = 0.0) -> np.ndarray:
+def arcs_on_land(
+    land: Land, lat0, lon0, lat1, lon1, piece_km: float = 20.0, clearance_km: float = 0.0, open_sea: OpenWater | None = None
+) -> np.ndarray:
     """Whether each great-circle arc from (lat0, lon0) to (lat1, lon1) comes within clearance_km of land.
 
     An arc is cut into pieces of at most piece_km, each tested as a straight lon/lat line;
     over 20 km the two differ by metres. The clearance is turned into degrees with the
     longitude scale at the piece, so it is at least clearance_km in every direction.
+    Given open_sea (and no clearance), pieces it shows to miss land are not looked up.
     """
     lat0, lon0, lat1, lon1 = np.broadcast_arrays(*(np.atleast_1d(np.asarray(v, float)) for v in (lat0, lon0, lat1, lon1)))
     n = np.maximum(1, np.ceil(haversine_km(lat0, lon0, lat1, lon1) / piece_km)).astype(int)
     arc = np.repeat(np.arange(len(n)), n)
-    k = np.arange(len(arc)) - np.repeat(np.cumsum(n) - n, n)
-    a_lat, a_lon = along(lat0[arc], lon0[arc], lat1[arc], lon1[arc], k / n[arc])
-    b_lat, b_lon = along(lat0[arc], lon0[arc], lat1[arc], lon1[arc], (k + 1) / n[arc])
+    on = np.repeat(np.arange(len(n)), n + 1)  # the n + 1 ends of each arc's pieces
+    k = np.arange(len(on)) - np.repeat(np.cumsum(n + 1) - (n + 1), n + 1)
+    p_lat, p_lon = along(lat0[on], lon0[on], lat1[on], lon1[on], k / n[on])
+    a_lat, a_lon, b_lat, b_lon = p_lat[k < n[on]], p_lon[k < n[on]], p_lat[k > 0], p_lon[k > 0]
+    look = None
+    if open_sea is not None and clearance_km <= 0:
+        look = ~_open_pieces(open_sea.safe, open_sea.lat0, open_sea.root, a_lat, a_lon, b_lat, b_lon)
+    hit = _pieces_on_land(land, a_lat, a_lon, b_lat, b_lon, look, clearance_km)
+    return np.bincount(arc, weights=hit, minlength=len(n)) > 0
+
+
+def _pieces_on_land(land: Land, a_lat, a_lon, b_lat, b_lon, look=None, clearance_km: float = 0.0) -> np.ndarray:
+    """Whether each straight lon/lat piece comes within clearance_km of land; only those in look are looked up."""
     b_lon = a_lon + (b_lon - a_lon + 180) % 360 - 180  # a piece crossing ±180° runs past it
-    a, b = np.column_stack([a_lon, a_lat]), np.column_stack([b_lon, b_lat])
-    deg = clearance_km / (111.32 * np.cos(np.radians((a_lat + b_lat) / 2)))
+    look = np.ones(len(a_lat), bool) if look is None else look
+    a, b = np.column_stack([a_lon, a_lat])[look], np.column_stack([b_lon, b_lat])[look]
+    deg = clearance_km / (111.32 * np.cos(np.radians((a_lat[look] + b_lat[look]) / 2)))
 
     def touches(lines, k):
         return land.crosses(lines) if clearance_km <= 0 else land.near(lines, deg[k])
 
     hit = touches(shapely.linestrings(np.stack([a, b], axis=1)), slice(None))
-    for shift, past in ((360.0, b_lon < -180), (-360.0, b_lon > 180)):
+    for shift, past in ((360.0, b[:, 0] < -180), (-360.0, b[:, 0] > 180)):
         if past.any():
             hit[past] |= touches(shapely.linestrings(np.stack([a[past] + [shift, 0], b[past] + [shift, 0]], axis=1)), past)
-    return np.bincount(arc, weights=hit, minlength=len(n)) > 0
+    out = np.zeros(len(a_lat), bool)
+    out[look] = hit
+    return out
 
 
 def along(lat0, lon0, lat1, lon1, f):

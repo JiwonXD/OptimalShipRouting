@@ -19,6 +19,7 @@ rate depends only on the total resistance, so it is read from a table of the
 ship model over resistance; wave added resistance comes from a table too.
 """
 
+import functools
 import time
 from dataclasses import dataclass, field
 
@@ -57,8 +58,8 @@ class FuelCost:
     seconds: float = 0.0  # spent computing fuel
     _args: tuple | None = field(default=None, repr=False)  # for kernel.fuel_kg, this speed alone
 
-    @property
-    def calm_kg_per_km(self) -> float:
+    @functools.cached_property
+    def calm_kg_per_km(self) -> float:  # cached: the propeller's operating point is solved in Python
         return self.ship.fuel_rate(self.speed) / (self.speed * 3.6)
 
     def _tables(self) -> tuple:
@@ -109,6 +110,26 @@ class FuelCost:
         """Fuel, kg, and hours of each move (kg as in kg)."""
         kg, h = fuel_kg([self], self._tables(), lat_a, lon_a, lat_b, lon_b, hours)
         return kg[0], h[0]
+
+    def resistance_parts(self, lat_a, lon_a, lat_b, lon_b, hours=0.0) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+        """Air and wave added resistance, N, and hours of each move, as kg_hours sees them (the
+        calm-water part is ship.resistance(speed)). For judging other ship models on the same
+        moves: at a fixed speed through the water the hours do not depend on the ship."""
+        base = list(self._tables())
+        base[11] = base[12] = np.array([[0.0, 1e15]])  # fuel rate = resistance, so the kernel gives resistance x hours
+
+        def total(args):
+            moves = np.broadcast_arrays(*(np.asarray(v, np.float64) for v in (lat_a, lon_a, lat_b, lon_b, hours)))
+            out, out_h = np.empty((1, moves[0].size)), np.empty((1, moves[0].size))
+            kernel.fuel_kg(*(np.ascontiguousarray(v).ravel() for v in moves), out, out_h, np.zeros((1, 3), np.int64), *args)
+            return out[0] / out_h[0], out_h[0]
+
+        everything, h = total(base)
+        base[10] = np.zeros_like(base[10])
+        no_waves, _ = total(base)
+        base[6] = 0.0
+        calm, _ = total(base)
+        return no_waves - calm, everything - no_waves, h
 
     def edge_costs(self, graph: Graph, chunk: int = 1_000_000) -> tuple[np.ndarray, np.ndarray]:
         """Fuel, kg, and hours of every move of the graph, aligned with graph.indices, for quadtree.astar."""
@@ -232,7 +253,7 @@ def run(graph: Graph, ship: Ship, forecast: Forecast, speed_kn: float, max_secon
             }
         print(row, flush=True)
         for key, r in found.items():
-            row[key] |= {"lat": np.round(r.lat, 4).tolist(), "lon": np.round(r.lon, 4).tolist(), "on_link": r.on_link.tolist()}
+            row[key] |= {"lat": np.round(r.lat, 6).tolist(), "lon": np.round(r.lon, 6).tolist(), "on_link": r.on_link.tolist()}
         rows.append(row)
     return rows
 

@@ -158,15 +158,16 @@ def test_the_least_fuel_route_keeps_going_round_a_storm():
     out = plan_module.plan(GRAPH, KCS_SHIP, fc, START, (0.5, 165.5), T0, T0 + np.timedelta64(60, "h"), (12, 16, 20), land=LAND)
     r = out["least_fuel"]
     lat, lon = np.array(r["lat"]), np.array(r["lon"])
-    assert not ((np.abs(lat - 0.5) < 2.5) & (lon > 155) & (lon < 160)).any()  # round it, not through
+    # round it, not through: outside the storm's cells (the weather fades out to the next row, 1° on, which a way may skirt)
+    assert not ((np.abs(lat - 0.5) <= 2) & (lon > 155) & (lon < 160)).any()
     assert r["fuel_t"] < out["shortest"]["fuel_t"]
 
 
 def test_the_shortest_route_is_kept_when_the_search_finds_nothing_better(monkeypatch):
     import dataclasses
 
-    fill = plan_module.SpeedChoice.fill_slack
-    monkeypatch.setattr(plan_module.SpeedChoice, "fill_slack", lambda self, r, eta: dataclasses.replace(fill(self, r, eta), cost=1e9))
+    retime = plan_module.SpeedChoice.retime
+    monkeypatch.setattr(plan_module.SpeedChoice, "retime", lambda self, r, eta, **kw: dataclasses.replace(retime(self, r, eta, **kw), cost=1e9))
     via = [(4.5, 152.5)]
     out = plan(70.0, via=via, land=LAND)
     short, best = out["shortest"], out["least_fuel"]
@@ -175,6 +176,85 @@ def test_the_shortest_route_is_kept_when_the_search_finds_nothing_better(monkeyp
     assert len(best["legs"]) == 2 and sum(leg["hours"] for leg in best["legs"]) == pytest.approx(short["hours"], abs=0.2)
 
 
+def test_the_shortest_route_with_its_speeds_chosen_is_kept_when_the_way_found_is_longer(monkeypatch):
+    monkeypatch.setattr(plan_module.SpeedChoice, "shortcut", lambda self, land, f, keep, **kw: f)  # the way found keeps its grid steps
+    monkeypatch.setattr(plan_module.SpeedChoice, "relax", lambda self, land, f, keep, *a, **kw: f)
+    fc = forecast(wind_u=-10.0, Hs=2.0, wave_from_x=1.0, T_m10=8.0)
+    fc.fields["wind_u"][1] = 10.0
+    out = plan_module.plan(GRAPH, KCS_SHIP, fc, (0.5, 150.5), (4.5, 165.5), T0, T0 + np.timedelta64(60, "h"), (12, 16, 20), land=LAND)
+    short, best = out["shortest"], out["least_fuel"]
+    assert best["is_shortest"] and best["lat"] == short["lat"] and best["hours"] <= 60.0 + 0.05
+    assert best["fuel_t"] < short["fuel_t"]  # the speeds chosen again, not the one speed the shortest route sails at
+
+
 def test_the_hours_the_forecast_covers_are_given():
     out = plan(25.0)
     assert out["forecast_hours"] == pytest.approx(6.0)  # the test forecast runs 6 h past the departure
+
+
+def test_port_distances_are_compared_with_a_reference_table(tmp_path, monkeypatch, capsys):
+    import argparse
+    import csv
+    import sys
+    from pathlib import Path
+
+    sys.path.insert(0, str(Path(__file__).parents[1] / "scripts"))
+    import experiment
+
+    monkeypatch.setattr(experiment, "sea_graph", lambda args: (LAND, GRAPH))
+    matrix = {"ports": {"a": list(START), "b": list(GOAL), "c": [4.5, 165.5]}}
+    ref = tmp_path / "ref.csv"
+    km = float(haversine_km(*START, *GOAL))
+    ref.write_text(f"from,to,nm,via\na,b,{km / 1.852 * 1.02:.1f},open sea\n", encoding="utf-8")
+    out = tmp_path / "d.csv"
+    experiment.cmd_distances(argparse.Namespace(pairs=None, reference=str(ref), out=str(out), tables=None), matrix)
+    rows = list(csv.DictReader(out.open(encoding="utf-8")))
+    assert [(r["from"], r["to"]) for r in rows] == [("a", "b")]  # the reference's pairs
+    assert float(rows[0]["diff_pct"]) == pytest.approx(100 * (1 / 1.02 - 1), abs=0.3)
+
+
+def test_the_plan_keeps_the_cheapest_of_every_way_the_price_search_found_once_finished():
+    import sys
+
+    sys.path.insert(0, "scripts")
+    from oracle_gap import every_route
+
+    fc = forecast(wind_u=-10.0, Hs=2.0, wave_from_x=1.0, T_m10=8.0)
+    lat, lon = np.arange(-90.0, 90.5, 1.0), np.arange(0.0, 360.0, 1.0)
+    storm = (np.abs(lat - 0.5) <= 2)[:, None] & ((lon >= 155) & (lon <= 160))[None, :]
+    for name, value in (("Hs", 7.0), ("wind_u", -30.0)):
+        fc.fields[name][:, storm] = value
+    out = every_route(GRAPH, LAND, fc, START, (0.5, 165.5), T0, T0 + np.timedelta64(60, "h"), speeds_kn=(12, 16, 20))
+    assert plan_module.meet_eta.__name__ == "meet_eta"  # put back
+    assert len(out["tries"]) >= 2 and any(t["found_in_time"] for t in out["tries"])
+    assert out["best_finished_t"] == pytest.approx(out["kept_t"], abs=0.01)  # the plan finished them all too, and kept the best
+    assert all(t["finished_h"] is None or t["finished_h"] <= 60 + 1e-6 for t in out["tries"])
+
+
+def test_a_plan_arrives_in_time_when_only_the_finished_ways_do(monkeypatch):
+    # Off a coarse cell near port the way on the cells detours: none of the searched ways arrives in time
+    # on the cells, but finished (corners cut) one does.
+    meet_eta = plan_module.meet_eta
+    monkeypatch.setattr(plan_module, "meet_eta", lambda graph, s, g, choice, eta, **kw: meet_eta(graph, s, g, choice, eta * 0.5, **kw))
+    fc = forecast(wind_u=-10.0, Hs=2.0, wave_from_x=1.0, T_m10=8.0)
+    out = plan_module.plan(GRAPH, KCS_SHIP, fc, START, (0.5, 165.5), T0, T0 + np.timedelta64(60, "h"), (12, 16, 20), land=LAND)
+    assert all(not t["in_time"] for t in out["tries"][0])
+    assert "least_fuel" in out and out["least_fuel"]["hours"] <= 60.0 + 1e-6
+    assert out["least_fuel"]["fuel_t"] <= out["shortest"]["fuel_t"]
+
+
+def test_the_shortest_route_moved_sideways_for_the_weather_is_offered_too(monkeypatch):
+    # The search on the cells' steps need not come near the shortest route (searched along arcs):
+    # the shortest route itself is relaxed in the weather and offered as a least-fuel way.
+    relax, seen = plan_module.SpeedChoice.relax, []
+
+    def spy(self, land, r, keep=(), *a, **kw):
+        seen.append((np.array(r.lat), np.array(r.lon)))
+        return relax(self, land, r, keep, *a, **kw)
+
+    monkeypatch.setattr(plan_module.SpeedChoice, "relax", spy)
+    out = plan(70.0, land=LAND)
+    short = out["shortest"]
+    assert any(len(lat) == len(short["lat"]) and np.allclose(lat, short["lat"], atol=1e-4) and np.allclose(lon, short["lon"], atol=1e-4)
+               for lat, lon in seen)
+    assert out["least_fuel"]["fuel_t"] <= short["fuel_t"]

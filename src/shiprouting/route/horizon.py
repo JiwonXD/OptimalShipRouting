@@ -67,7 +67,7 @@ def run(graph: Graph, ship: Ship, forecast: Forecast, came: Forecast, speed_kn: 
             }
         print(row, flush=True)
         for key, r in found.items():
-            row[key] |= {"lat": np.round(r.lat, 4).tolist(), "lon": np.round(r.lon, 4).tolist()}
+            row[key] |= {"lat": np.round(r.lat, 6).tolist(), "lon": np.round(r.lon, 6).tolist()}
         rows.append(row)
     return rows
 

@@ -161,6 +161,55 @@ def test_arcs_can_be_required_to_keep_clear_of_land():
     assert arcs_on_land(island, 0.105, 9.0, 0.105, 11.0, clearance_km=1.0).all()
 
 
+def test_the_search_along_arcs_finds_the_strait_the_steps_between_cells_hide():
+    from shiprouting.sea.quadtree import any_angle, arcs_on_land, straighten
+
+    # An island from 10°S to 1°N cut by a strait 0.1° wide at 0.6°S. Through the strait is the
+    # shorter way, but its small cells make the steps between centres zigzag: on the steps the
+    # way round the north end looks shorter, and straightening that way cannot change it.
+    land = Land([shapely.box(4.0, -10.0, 6.0, -0.6), shapely.box(4.0, -0.5, 6.0, 1.0)])
+    g = Graph.build(land, root=0.5, min_step=1 / 16, lat_limits=(-12.0, 12.0))
+    s, t = g.nearest(0.1, 0.2), g.nearest(0.1, 9.8)
+    steps = straighten(land, astar(g, s, t))
+    assert steps.lat.max() > 1.0  # round the north end
+    r = any_angle(land, g, s, t)
+    assert r.km < steps.km - 5
+    inside = (r.lon > 4) & (r.lon < 6)
+    assert inside.any() and np.all((r.lat[inside] > -0.6) & (r.lat[inside] < -0.5))
+    assert not arcs_on_land(land, r.lat[:-1], r.lon[:-1], r.lat[1:], r.lon[1:]).any()
+    assert r.clock[-1] == pytest.approx(r.km)
+
+
+def test_arcs_over_open_water_are_cleared_without_looking_up_land_and_agree_with_it():
+    from shiprouting.sea.quadtree import arcs_on_land, open_water
+
+    rng = np.random.default_rng(1)
+    boxes = [shapely.box(x, y, x + w, y + h) for x, y, w, h in rng.uniform([-180, -30, 0.05, 0.05], [176, 26, 4, 4], (60, 4))]
+    land = Land(list(shapely.union_all(boxes).geoms))
+    g = Graph.build(land, root=0.5, min_step=1 / 8, lat_limits=(-40.0, 40.0))
+    sea = open_water(g)
+    near = np.nonzero(g.size < 0.5)[0]
+    p = np.r_[rng.integers(0, len(g.lat), 300), rng.choice(near, 300)]
+    q = np.r_[rng.integers(0, len(g.lat), 300), [rng.choice(near[np.abs(g.lat[near] - g.lat[i]) + np.abs(g.lon[near] - g.lon[i]) < 3]) for i in p[300:]]]
+    clear = np.array([sea.clear(land, g.lat[i], g.lon[i], g.lat[j], g.lon[j]) for i, j in zip(p, q)])
+    assert 0.1 < clear.mean() < 0.9
+    assert np.array_equal(clear, ~arcs_on_land(land, g.lat[p], g.lon[p], g.lat[q], g.lon[q]))
+
+
+def test_the_search_along_arcs_takes_links_whole_and_crosses_the_dateline():
+    from shiprouting.sea.quadtree import any_angle
+
+    canal = Link("운하", np.array([-20.0, -20.0]), np.array([-0.5, 2.5]))
+    g = Graph.build(WALL, root=1.0, min_step=1 / 16, lat_limits=(-40.0, 40.0), links=[canal])
+    r = any_angle(WALL, g, g.nearest(-20.5, -5.5), g.nearest(-20.5, 7.5))
+    assert r.links == ["운하"]
+    assert r.on_link.tolist() == [False, False, True, False, False]
+    assert r.km < astar(g, g.nearest(-20.5, -5.5), g.nearest(-20.5, 7.5)).km
+    r = any_angle(WALL, g, g.nearest(-10.5, 170.5), g.nearest(-12.5, -170.5))
+    assert len(r.lat) == 2  # one arc over open water
+    assert r.km == pytest.approx(haversine_km(-10.5, 170.5, -12.5, -170.5))
+
+
 def path(points, on_link=None):
     from shiprouting.sea.latlon import SearchResult
 
@@ -217,3 +266,17 @@ def test_a_v_shaped_corner_is_cut_twice():
     s = smooth_turns(wall, r)
     assert len(s.lat) >= 5
     assert (turn_deg(s.lat, s.lon) < 60).all()
+
+
+def test_a_path_round_a_corner_is_pulled_taut_against_it():
+    from shiprouting.sea.quadtree import arcs_on_land, tighten
+
+    corner = Land([shapely.box(0.0, -2.0, 1.0, 0.8)])  # land up to 0.8°N between 0° and 1°E, across the straight way
+    r = path([(0.5, -1.0), (1.5, 0.0), (1.5, 0.5), (1.5, 1.0), (0.5, 2.0)])  # over it, some way north of the coast
+    t = tighten(corner, r)
+    # Round the two corners of the land, (0.8°N, 0°) and (0.8°N, 1°E): points move only sideways, so close to it.
+    taut = float(haversine_km(0.5, -1.0, 0.8, 0.0) + haversine_km(0.8, 0.0, 0.8, 1.0) + haversine_km(0.8, 1.0, 0.5, 2.0))
+    assert r.km > 1.2 * taut and t.km < 1.015 * taut
+    assert t.lat[1:-1].max() < 0.9
+    assert not arcs_on_land(corner, t.lat[:-1], t.lon[:-1], t.lat[1:], t.lon[1:]).any()
+    assert t.clock[-1] == pytest.approx(t.km) and (t.lat[[0, -1]] == r.lat[[0, -1]]).all()

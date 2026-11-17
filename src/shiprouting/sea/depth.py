@@ -33,6 +33,26 @@ class Bathymetry:
         j = np.floor((np.asarray(lon, float) - self.lon0) / self.step + 0.5).astype(int) % self.z.shape[1]
         return np.asarray(self.z[np.clip(i, 0, self.z.shape[0] - 1), j])
 
+    def deeper_than(self, min_depth: float, root: float, lat_south: float, rows: int) -> np.ndarray:
+        """[row, column] of the root grid from lat_south and -180°: whether every grid cell a
+        point in the box (edges included) is read off is more than min_depth m deep."""
+        n_lat, n_lon = self.z.shape
+
+        def index(v, v0):
+            return np.floor((np.asarray(v, float) - v0) / self.step + 0.5).astype(int)
+
+        x = -180 + root * np.arange(round(360 / root) + 1)
+        first, last = index(x[:-1], self.lon0) % n_lon, index(x[1:], self.lon0) % n_lon
+        out = np.zeros((rows, len(first)), bool)
+        for r in range(rows):
+            a, b = index([lat_south + r * root, lat_south + (r + 1) * root], self.lat0)
+            if a < 0 or b >= n_lat:
+                continue
+            top = np.asarray(self.z[a : b + 1]).max(axis=0)
+            highest = np.maximum(np.maximum.reduceat(top, first), top[last])  # first to last, by the reduceat's runs
+            out[r] = -highest.astype(float) > min_depth
+        return out
+
 
 class LandOrShallow:
     """Land, and water min_depth m deep or less, behind the queries Land answers.
@@ -49,6 +69,14 @@ class LandOrShallow:
         self.land, self.bathy, self.min_depth, self.chunk = land, bathy, min_depth, chunk
         self.exempt, self.exempt_km = list(exempt), exempt_km
         self.tree, self.fraction = land.tree, land.fraction
+        self._deep = {}
+
+    def deep(self, root: float, lat_south: float, rows: int) -> np.ndarray:
+        """Root cells wholly deeper than min_depth (Bathymetry.deeper_than), kept once worked out."""
+        key = (root, lat_south, rows)
+        if key not in self._deep:
+            self._deep[key] = self.bathy.deeper_than(self.min_depth, root, lat_south, rows)
+        return self._deep[key]
 
     def shallow(self, lat, lon) -> np.ndarray:
         lat, lon = np.broadcast_arrays(np.asarray(lat, float), np.asarray(lon, float))

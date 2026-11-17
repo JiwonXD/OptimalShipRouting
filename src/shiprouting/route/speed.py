@@ -17,10 +17,11 @@ from dataclasses import dataclass, field
 
 import numpy as np
 
+from shiprouting.route import kernel
 from shiprouting.route.fuel import KNOT, FuelCost, fuel_kg, stacked_tables
 from shiprouting.sea.latlon import SearchResult, haversine_km
 from shiprouting.sea.land import Land
-from shiprouting.sea.quadtree import Graph, along, arcs_on_land, astar, join_legs
+from shiprouting.sea.quadtree import Graph, OpenWater, along, arcs_on_land, astar, join_legs, trace
 
 
 @dataclass
@@ -34,6 +35,23 @@ class SpeedChoice:
         if self._args is None:
             self._args = stacked_tables(self.costs)
         return fuel_kg(self.costs, self._args, lat_a, lon_a, lat_b, lon_b, hours)
+
+    def kg_hours_at(self, lat_a, lon_a, lat_b, lon_b, hours, at) -> tuple[np.ndarray, np.ndarray]:
+        """kg_hours of each move at its own speed index `at` only, 1-D: kg_hours(...)[:, at[m], m]."""
+        if self._args is None:
+            self._args = stacked_tables(self.costs)
+        t0 = time.perf_counter()
+        moves = np.broadcast_arrays(*(np.asarray(v, np.float64) for v in (lat_a, lon_a, lat_b, lon_b, hours)), np.asarray(at, np.int64))
+        moves = [np.ascontiguousarray(v).ravel() for v in moves]
+        out, out_h, counts = np.empty(moves[0].size), np.empty(moves[0].size), np.zeros((len(self.costs), 3), np.int64)
+        kernel.fuel_kg_at(*moves, out, out_h, counts, *self._args)
+        seconds = (time.perf_counter() - t0) / len(self.costs)
+        for c, m in zip(self.costs, counts):
+            c.no_waves += int(m[0])
+            c.over_mcr += int(m[1])
+            c.beyond_forecast += int(m[2])
+            c.seconds += seconds
+        return out, out_h
 
     def kg(self, lat_a, lon_a, lat_b, lon_b, hours=0.0) -> np.ndarray:
         """FuelCost.kg at every speed in one pass, shape (speeds, *moves)."""
@@ -52,6 +70,64 @@ class SpeedChoice:
             return total[pick, moves], h[pick, moves]
 
         return costs
+
+    def search(self, graph: Graph, s: int, g: int, max_seconds: float = math.inf, clock0: float = 0.0,
+               chunk: int = 100_000, heap: int | None = None) -> SearchResult:
+        """astar(graph, s, g, self.edge_cost(graph), self.link_cost, lambda n: 0.0, max_seconds, clock0),
+        compiled (kernel.search): the same path, clock and cost. The time limit is checked every
+        `chunk` cells expanded; the heap starts with room for `heap` entries (twice the nodes)
+        and doubles when full."""
+        t0 = time.perf_counter()
+        if self._args is None:
+            self._args = stacked_tables(self.costs)
+        speed = np.array([c.speed for c in self.costs])
+        calm = np.array([c.calm_kg_per_km for c in self.costs])
+        n_nodes = len(graph.lat)
+        jumps = [[] for _ in range(n_nodes)] if graph.links else None
+        for i, (a, b, link) in enumerate(graph.links):  # as astar builds its jumps
+            km = (
+                float(haversine_km(graph.lat[a], graph.lon[a], link.lat[0], link.lon[0]))
+                + link.km
+                + float(haversine_km(graph.lat[b], graph.lon[b], link.lat[-1], link.lon[-1]))
+            )
+            jumps[a].append((b, km, i, False))
+            jumps[b].append((a, km, i, True))
+        jptr = np.zeros(n_nodes + 1, np.int64)
+        flat = []
+        if jumps is not None:
+            jptr[1:] = np.cumsum([len(j) for j in jumps])
+            flat = [j for js in jumps for j in js]
+        jto = np.array([j[0] for j in flat], np.int64)
+        jkg = np.array([[j[1] * c for c in calm] for j in flat], float).reshape(len(flat), len(speed))
+        jh = np.array([[j[1] / (v * 3.6) for v in speed] for j in flat], float).reshape(len(flat), len(speed))
+        best, clock = np.full(n_nodes, np.inf), np.zeros(n_nodes)
+        parent, via, closed = np.full(n_nodes, -1, np.int64), np.full(n_nodes, -1, np.int64), np.zeros(n_nodes, bool)
+        hc, hn = np.empty(heap or 2 * n_nodes), np.empty(heap or 2 * n_nodes, np.int64)
+        best[s], clock[s] = 0.0, clock0
+        state, counts = np.array([1, 0], np.int64), np.zeros((len(speed), 3), np.int64)
+        hc[0], hn[0] = 0.0, s
+        indptr, indices = graph.indptr.astype(np.int64), graph.indices.astype(np.int64)
+        while True:
+            status = kernel.search(indptr, indices, graph.lat, graph.lon, jptr, jto, jkg, jh, g, float(self.per_hour), chunk,
+                                   best, clock, parent, via, closed, hc, hn, state, counts, *self._args)  # fmt: skip
+            if status == 1:
+                break
+            if status == 3:
+                raise ValueError(f"no route ({state[1]} cells expanded)")
+            if status == 2:
+                hc, hn = np.r_[hc, np.empty(len(hc))], np.r_[hn, np.empty(len(hn), np.int64)]
+            if time.perf_counter() - t0 > max_seconds:
+                raise TimeoutError(f"stopped after {max_seconds:g} s ({state[1]} cells expanded)")
+        for c, m in zip(self.costs, counts):
+            c.no_waves += int(m[0])
+            c.over_mcr += int(m[1])
+            c.beyond_forecast += int(m[2])
+        back, n = {s: None}, g
+        while n != s:
+            j = via[n]
+            back[n] = (int(parent[n]), None, False) if j < 0 else (int(parent[n]), graph.links[flat[j][2]][2], flat[j][3])
+            n = int(parent[n])
+        return trace(graph, s, g, back, clock, float(best[g]), int(state[1]), time.perf_counter() - t0)
 
     def link_cost(self, link, km: float, hours: float) -> tuple[float, float]:
         kg, h = min((c.link_cost(link, km, hours) for c in self.costs), key=lambda kg_h: kg_h[0] + self.per_hour * kg_h[1])
@@ -103,7 +179,8 @@ class SpeedChoice:
         arrives no later: a path smoothed after the search has segments sailed at no offered speed."""
         return dataclasses.replace(r, clock=self.sail(r, self.speed_index(r))[0])
 
-    def shortcut(self, land: Land, r: SearchResult, keep_points=(), piece_km: float = 20.0, step: float = 1.5) -> SearchResult:
+    def shortcut(self, land: Land, r: SearchResult, keep_points=(), piece_km: float = 20.0, step: float = 1.5,
+                 open_sea: OpenWater | None = None) -> SearchResult:
         """Cut the grid's steps out of a path found with edge_cost, keeping the way the weather chose.
 
         The cells only join in eight directions, so a found path runs in steps even across open
@@ -113,6 +190,7 @@ class SpeedChoice:
         burns no more fuel. An arc through weather the path went round costs more and is not
         taken. Arcs are cut into pieces of piece_km at most, each timed as the path's stretch
         is, in proportion to distance. Links, the two ends and the points at keep_points stay.
+        Given open_sea (quadtree.open_water), arcs it shows to miss land are not looked up: the same answers, faster.
         """
         n = len(r.lat) - 1
         lat, lon = r.lat, np.degrees(np.unwrap(np.radians(r.lon)))
@@ -130,7 +208,7 @@ class SpeedChoice:
             if not r.on_link[i]:
                 stop = i + 1 + int(np.argmax(fixed[i + 1 :]))
                 cand = np.unique(np.r_[np.minimum(i + np.ceil(step ** np.arange(64)).astype(int), stop), stop])
-                cand = cand[~arcs_on_land(land, lat[i], lon[i], lat[cand], lon[cand])][::-1]
+                cand = cand[~arcs_on_land(land, lat[i], lon[i], lat[cand], lon[cand], open_sea=open_sea)][::-1]
                 for c in cand[cand > i + 1]:
                     km = float(haversine_km(lat[i], lon[i], lat[c], lon[c]))
                     f = np.arange(int(np.ceil(km / piece_km)) + 1) / int(np.ceil(km / piece_km))
@@ -155,6 +233,135 @@ class SpeedChoice:
         p_lon = (p_lon + 180) % 360 - 180
         km = float(haversine_km(p_lat[:-1], p_lon[:-1], p_lat[1:], p_lon[1:]).sum())
         return dataclasses.replace(r, lat=p_lat, lon=p_lon, on_link=np.array(on_link, bool), km=km, clock=np.array(clock))
+
+    def relax(self, land: Land, r: SearchResult, keep_points=(), step_km: float = 16.0, min_km: float = 0.25,
+              max_sweeps: int = 400, open_sea: OpenWater | None = None) -> SearchResult:
+        """Move a path's points sideways where that is cheaper, off the grid's eight directions.
+
+        The cells only join in eight directions, and cutting corners (shortcut) keeps to the way
+        the found path went, so a path that should curve across open sea stays some way off its
+        best line. Each point in turn is moved step_km to either side of the line between its
+        neighbours; the move is kept if the two segments it joins, at their speeds and times,
+        then arrive no later and burn no more fuel, one of them strictly, and miss land. Odd and
+        even points take turns, so each move is judged against fixed neighbours. When a sweep
+        keeps nothing the step is halved, down to min_km. Links, the two ends and keep_points stay.
+        open_sea as in shortcut.
+        """
+        n = len(r.lat) - 1
+        if n < 2:
+            return r
+        k = self.speed_index(r)
+        fixed = np.zeros(n + 1, bool)
+        fixed[[0, -1, *keep_points]] = True
+        fixed[:-1] |= r.on_link
+        fixed[1:] |= r.on_link
+        lat, lon, clock = r.lat.copy(), r.lon.copy(), r.clock.copy()
+
+        def unit(la, lo):
+            p, q = np.radians(la), np.radians(lo)
+            return np.stack([np.cos(p) * np.cos(q), np.cos(p) * np.sin(q), np.sin(p)])
+
+        def pair(la, lo, i):
+            """Fuel and hours of segments i-1 and i, through the points (la, lo) in place of point i."""
+            kg1, h1 = self.kg_hours_at(lat[i - 1], lon[i - 1], la, lo, clock[i - 1], k[i - 1])
+            kg2, h2 = self.kg_hours_at(la, lo, lat[i + 1], lon[i + 1], clock[i - 1] + h1, k[i])
+            return kg1 + kg2, h1 + h2
+
+        step, sweeps = step_km, 0
+        while step >= min_km and sweeps < max_sweeps:
+            sweeps += 1
+            moved = 0
+            for parity in (1, 2):
+                i = np.arange(parity, n, 2)
+                i = i[~fixed[i]]
+                if not len(i):
+                    continue
+                kg0, h0 = pair(lat[i], lon[i], i)
+                a, b, p = unit(lat[i - 1], lon[i - 1]), unit(lat[i + 1], lon[i + 1]), unit(lat[i], lon[i])
+                side = np.cross(a, b, axis=0)
+                side /= np.maximum(np.linalg.norm(side, axis=0), 1e-15)
+                best = np.zeros(len(i), bool)
+                for sign in (1.0, -1.0):
+                    d = sign * step / 6371.0088
+                    q = np.cos(d) * p + np.sin(d) * side
+                    q_lat = np.degrees(np.arctan2(q[2], np.hypot(q[0], q[1])))
+                    q_lon = np.degrees(np.arctan2(q[1], q[0]))
+                    q_lon = lon[i] + (q_lon - lon[i] + 180) % 360 - 180
+                    kg1, h1 = pair(q_lat, q_lon, i)
+                    better = ((kg1 <= kg0) & (h1 <= h0 * (1 + 1e-12)) & ((kg1 < kg0 * (1 - 1e-9)) | (h1 < h0 * (1 - 1e-9))) & ~best
+                              & np.isfinite(kg1))
+                    if better.any():
+                        j = np.nonzero(better)[0]
+                        ok = ~(arcs_on_land(land, lat[i[j] - 1], lon[i[j] - 1], q_lat[j], q_lon[j], open_sea=open_sea)
+                               | arcs_on_land(land, q_lat[j], q_lon[j], lat[i[j] + 1], lon[i[j] + 1], open_sea=open_sea))
+                        j = j[ok]
+                        lat[i[j]], lon[i[j]] = q_lat[j], q_lon[j]
+                        kg0[j], h0[j] = kg1[j], h1[j]
+                        best[j] = True
+                moved += int(best.sum())
+                h = haversine_km(lat[:-1], lon[:-1], lat[1:], lon[1:]) / np.array([c.speed * 3.6 for c in self.costs])[k]
+                a = np.nonzero(~r.on_link)[0]
+                h[a] = self.kg_hours_at(lat[a], lon[a], lat[a + 1], lon[a + 1], clock[a], k[a])[1]  # segments(...)[1][k, :]
+                clock = clock[0] + np.r_[0.0, np.cumsum(h)]
+            if moved == 0:
+                step /= 2
+        lon = (lon + 180) % 360 - 180
+        out = dataclasses.replace(r, lat=lat, lon=lon, km=float(haversine_km(lat[:-1], lon[:-1], lat[1:], lon[1:]).sum()))
+        clock, kg, _ = self.sail(out, k)
+        return dataclasses.replace(out, clock=clock, cost=float(kg[k, np.arange(n)].sum()))
+
+    def retime(self, r: SearchResult, eta_hours: float, dt_hours: float = 0.02, max_current: float = 2.5,
+               per_hour: float | None = None) -> SearchResult:
+        """The speeds on r's way that burn the least fuel arriving within eta_hours of r's first clock.
+
+        The way is kept; each segment takes one of the offered speeds. The segments are sailed
+        in order, each label (time, fuel) going on at every speed; labels that can no longer
+        arrive in time, even at the fastest speed with max_current behind, are dropped. Of the
+        labels whose times fall in the same bucket of dt_hours only one is kept: the least
+        fuel + per_hour x hours (kg/h; by default self.per_hour, the price meet_eta left), so a
+        label a little later is not kept over an earlier one for less fuel than the time is
+        worth. Exact but for the buckets; r itself is returned if it arrives in time burning
+        less. (Keeping every label in a bucket that is earlier or burns less, as route.exact
+        does, grows without bound on a long way: slower is later and cheaper, so the labels in
+        a bucket rarely dominate.)"""
+        n = len(r.lat) - 1
+        seg_km = haversine_km(r.lat[:-1], r.lon[:-1], r.lat[1:], r.lon[1:])
+        speed = np.array([c.speed for c in self.costs])
+        calm = np.array([c.calm_kg_per_km for c in self.costs])
+        left_h = np.r_[np.cumsum(seg_km[::-1])[::-1], 0.0] / ((speed.max() + max_current) * 3.6)
+        end = r.clock[0] + eta_hours * (1 + 1e-9)
+        price = self.per_hour if per_hour is None else per_hour
+        if self._args is None:
+            self._args = stacked_tables(self.costs)
+        counts = np.zeros((len(speed), 3), np.int64)
+        t, f = np.array([float(r.clock[0])]), np.array([0.0])
+        layers = []  # per segment: parent label and speed index of each label kept
+        for i in range(n):
+            if r.on_link[i]:
+                kg = np.repeat((seg_km[i] * calm)[:, None], len(t), axis=1)
+                h = np.repeat((seg_km[i] / (speed * 3.6))[:, None], len(t), axis=1)
+            else:
+                kg, h = np.empty((len(speed), len(t))), np.empty((len(speed), len(t)))
+                kernel.fuel_kg_times(float(r.lat[i]), float(r.lon[i]), float(r.lat[i + 1]), float(r.lon[i + 1]), t, kg, h, counts, *self._args)
+            t, f, parent, ks = kernel.prune(t, f, kg, h, float(left_h[i + 1]), float(end), float(dt_hours), float(price))
+            if not len(t):
+                raise ValueError(f"no speeds on this way arrive within {eta_hours:g} h")
+            layers.append((parent, ks))
+        for c, m in zip(self.costs, counts):
+            c.no_waves += int(m[0])
+            c.over_mcr += int(m[1])
+            c.beyond_forecast += int(m[2])
+        best = int(np.argmin(f))
+        k = np.empty(n, int)
+        for i in range(n - 1, -1, -1):
+            parent, ks = layers[i]
+            k[i] = ks[best]
+            best = parent[best]
+        clock, kg, _ = self.sail(r, k)
+        out = dataclasses.replace(r, clock=clock, cost=float(kg[k, np.arange(n)].sum()))
+        if r.clock[-1] <= end and (own := self.path(r)) < out.cost:  # r's own speeds, lost to the buckets, were better
+            return dataclasses.replace(r, cost=own)
+        return out
 
     def fill_slack(self, r: SearchResult, eta_hours: float, rounds: int = 20) -> SearchResult:
         """Spend the time a found path leaves before eta_hours: step segments down to the next
@@ -188,7 +395,8 @@ class SpeedChoice:
 
 
 def meet_eta(graph: Graph, s: int, g: int, choice: SpeedChoice, eta_hours: float, tolerance: float = 0.002,
-             max_tries: int = 12, max_seconds: float = math.inf, via=(), price: float | None = None) -> tuple[SearchResult | None, list[dict]]:
+             max_tries: int = 12, max_seconds: float = math.inf, via=(), price: float | None = None,
+             found: list | None = None) -> tuple[SearchResult | None, list[dict]]:
     """The least-fuel route found arriving within eta_hours, narrowing down the price of an hour.
 
     Through the nodes via in order, the legs are searched one after another at the same
@@ -202,7 +410,8 @@ def meet_eta(graph: Graph, s: int, g: int, choice: SpeedChoice, eta_hours: float
     Stops when a route arrives within a fraction `tolerance` of the voyage before the ETA, or after max_tries
     searches. The best route that arrived in time then spends the time it has left
     (SpeedChoice.fill_slack). Returns that route (None if none arrived in time) and a log
-    of the tries.
+    of the tries. Given a list `found`, every route searched, in time or late, is appended to
+    it as found (its cost the fuel alone).
     """
     tries, best, hours = [], None, {}
 
@@ -210,11 +419,13 @@ def meet_eta(graph: Graph, s: int, g: int, choice: SpeedChoice, eta_hours: float
         choice.per_hour = per_hour
         legs, clock = [], 0.0
         for a, b in zip([s, *via], [*via, g]):
-            legs.append(astar(graph, a, b, choice.edge_cost(graph), choice.link_cost, lambda n: 0.0, max_seconds, clock))
+            legs.append(choice.search(graph, a, b, max_seconds, clock))
             clock = float(legs[-1].clock[-1])
         r = join_legs(legs)
         fuel = r.cost - per_hour * float(r.clock[-1])
         hours[per_hour] = float(r.clock[-1])
+        if found is not None:
+            found.append(dataclasses.replace(r, cost=fuel))
         tries.append({"per_hour": round(per_hour, 1), "hours": round(float(r.clock[-1]), 1), "fuel_t": round(fuel / 1000, 2),
                       "seconds": round(r.seconds, 1), "in_time": bool(in_time(r))})
         print(f"  price {per_hour:8.1f} kg/h: {r.clock[-1]:7.1f} h, {fuel / 1000:8.2f} t, {r.seconds:5.1f} s", flush=True)
@@ -292,8 +503,8 @@ def run(graph: Graph, ship, forecast, speeds_kn, fixed_kn: float, max_tries: int
                 "expanded": r.expanded,
                 "seconds": round(r.seconds, 1),
                 "links": r.links,
-                "lat": np.round(r.lat, 4).tolist(),
-                "lon": np.round(r.lon, 4).tolist(),
+                "lat": np.round(r.lat, 6).tolist(),
+                "lon": np.round(r.lon, 6).tolist(),
                 "clock": np.round(r.clock, 2).tolist(),
             }
         print({k: ({kk: vv for kk, vv in v.items() if kk not in ("lat", "lon", "clock")} if isinstance(v, dict) else v) for k, v in row.items()}, flush=True)

@@ -305,7 +305,7 @@ function show(out) {
   const rows = parts.filter(p => !p.startsWith("<p")).join("");
   if (rows) html += `<table><tr><th></th><th>거리</th><th>시간</th><th>연료</th></tr>${rows}</table>`;
   if (out.saving_t !== undefined) html += `<p><b>절감 ${out.saving_t.toFixed(2)} t (${out.saving_pct.toFixed(2)}%)</b></p>`;
-  if (out.least_fuel && out.least_fuel.is_shortest) html += `<p style="color:var(--muted)">속력과 경로를 골라 찾은 것이 최단 경로보다 연료를 더 써서, 최단 경로를 그대로 최적으로 냈어요.</p>`;
+  if (out.least_fuel && out.least_fuel.is_shortest) html += `<p style="color:var(--muted)">찾은 경로보다 최단 경로가 연료를 덜 써서, 최단 경로를 최적으로 냈어요(속력은 다시 골랐어요).</p>`;
   const sailed = Math.max(...[out.shortest, out.least_fuel].filter(r => r).map(r => r.hours));
   if (out.forecast_hours !== undefined && sailed > out.forecast_hours) {
     const past = sailed - Math.max(out.forecast_hours, 0);

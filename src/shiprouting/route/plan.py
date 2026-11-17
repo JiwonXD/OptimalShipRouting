@@ -11,11 +11,18 @@ Waypoints are passed in order, each leg searched after the last. The least-fuel 
 either gives each leg a share of the time in proportion to its shortest distance
 (legs="distance"), or searches all legs at one price of an hour and meets the deadline
 for the voyage as a whole (legs="shared"). Given the land, the cells' steps are cut out:
-the shortest route's legs are straightened to great-circle arcs (quadtree.straighten),
-and the least-fuel route takes the shortcuts that burn no more fuel (SpeedChoice.shortcut).
+the shortest route's legs are searched along great-circle arcs (quadtree.any_angle) and pulled
+taut (quadtree.tighten),
+and the least-fuel route takes the shortcuts that burn no more fuel (SpeedChoice.shortcut)
+and moves its points sideways off the grid's eight directions where that is cheaper
+(SpeedChoice.relax).
 Both routes then have their sharp turns smoothed out (quadtree.smooth_turns), waypoints
-kept, and the least-fuel route is re-timed to the speeds on offer and spends the time
-that saves.
+kept, and the least-fuel route's speeds are chosen again on its final way, the least fuel
+that arrives by the deadline (SpeedChoice.retime). With no waypoints, every way the price
+search found on its way to the deadline, in time or late, is finished so too, and the
+cheapest that arrives by the deadline is kept: finished, the fuel follows the way more than
+the price it was found at. The shortest route, with its speeds chosen again and also moved
+sideways where the weather makes that cheaper (relax), is offered as a least-fuel way too.
 
 With currents, the surface current changes each move's speed over the ground (FuelCost),
 so the shortest route's one speed through the water is adjusted until it arrives at the
@@ -33,7 +40,17 @@ from shiprouting.fuel.waves import AddedResistanceTable
 from shiprouting.route.fuel import KNOT, FuelCost
 from shiprouting.route.speed import SpeedChoice, meet_eta
 from shiprouting.sea.latlon import ICE_FREE, SearchResult, haversine_km
-from shiprouting.sea.quadtree import Graph, astar, join_legs, smooth_turns, straighten
+from shiprouting.sea.quadtree import (
+    Graph,
+    any_angle,
+    arcs_on_land,
+    astar,
+    join_legs,
+    open_water,
+    smooth_turns,
+    straighten,
+    tighten,
+)
 from shiprouting.weather.forecast import Forecast
 
 SPEEDS_KN = (12, 14, 16, 18, 20, 22, 24)
@@ -42,11 +59,14 @@ MAX_MOVE_KM = 50.0  # a point farther than this from the nearest sea cell is tak
 
 def plan(graph: Graph, ship: Ship, forecast: Forecast, start, goal, departure, deadline, speeds_kn=SPEEDS_KN,
          tables: str | None = None, max_tries: int = 12, max_seconds: float = math.inf, via=(), legs: str = "distance",
-         land=None, currents: bool = True, prices=None, least_fuel: bool = True, keep_shortest: bool = True) -> dict:
+         land=None, currents: bool = True, prices=None, least_fuel: bool = True, keep_shortest: bool = True,
+         start_exact: bool = False) -> dict:
     """least_fuel=False finds the shortest route only. prices: the price of an hour each leg met
     its time at in a like plan before (out["prices"] of the last plan of the same voyage, say),
     to start from; one for legs="shared". keep_shortest: if the least-fuel route found burns
-    more than the shortest route, give the shortest route as the least-fuel one."""
+    more than the shortest route, give the shortest route as the least-fuel one. start_exact: begin
+    both routes at the start point itself, joined to its nearest cell by a straight segment (a
+    voyage replanned at sea, from a point of its last plan), unless that segment crosses land."""
     departure, deadline = np.datetime64(departure, "s"), np.datetime64(deadline, "s")
     hours = float((deadline - departure) / np.timedelta64(1, "h"))
     points = [start, *via, goal]
@@ -68,14 +88,24 @@ def plan(graph: Graph, ship: Ship, forecast: Forecast, start, goal, departure, d
             return out
     nodes = [graph.nearest(*p) for p in points]
     out["moved_km"] = [round(float(haversine_km(graph.lat[n], graph.lon[n], *p)), 1) for n, p in zip(nodes, points)]
-    for name, km in zip(names, out["moved_km"]):
-        if km > MAX_MOVE_KM:
+    for name, km in zip(names[1:] if start_exact else names, out["moved_km"][1:] if start_exact else out["moved_km"]):
+        if km > MAX_MOVE_KM:  # a start at sea taken exactly needs no cell near it
             out["error"] = (f"{name}에서 가장 가까운 바다 칸이 {km:,.0f} km 떨어져 있어요. 바다나 항구를 찍어 주세요"
                             f" (바다 지도는 남위 {-ICE_FREE[0]:g}° ~ 북위 {ICE_FREE[1]:g}°만 다뤄요).")
             return out
     if len(set(nodes)) == 1:
         out["error"] = "출발지와 도착지가 같은 바다 칸이에요."
         return out
+    first = (float(graph.lat[nodes[0]]), float(graph.lon[nodes[0]]))
+    exact = bool(start_exact and haversine_km(*start, *first) > 1e-3
+                 and (land is None or not arcs_on_land(land, start[0], start[1], *first)[0]))
+    out["start_exact"] = exact
+
+    def lead_in(r):
+        """r from the start point itself: its clock (the search's, km) carried on by the first segment's length."""
+        km = float(haversine_km(*start, r.lat[0], r.lon[0]))
+        return dataclasses.replace(r, lat=np.r_[start[0], r.lat], lon=np.r_[start[1], r.lon], on_link=np.r_[False, r.on_link],
+                                   km=r.km + km, clock=np.r_[0.0, r.clock + km])
 
     waves = {}
 
@@ -102,12 +132,14 @@ def plan(graph: Graph, ship: Ship, forecast: Forecast, start, goal, departure, d
     shortest = []
     for k, (a, b) in enumerate(zip(nodes[:-1], nodes[1:])):
         try:
-            shortest.append(astar(graph, a, b))
+            shortest.append(astar(graph, a, b) if land is None else any_angle(land, graph, a, b))
         except ValueError:  # searched all the water a reaches
             out["error"] = f"{names[k]}와 {names[k + 1]} 사이에 이어진 바닷길이 없어요 (카스피해처럼 바다로 이어지지 않은 물일 수 있어요)."
             return out
-    if land is not None:  # the cells' path steps between grid directions: cut it to great-circle arcs
-        shortest = [straighten(land, leg, piece_km=20.0) for leg in shortest]
+    if exact:
+        shortest[0] = lead_in(shortest[0])
+    if land is not None:  # cut into pieces of 20 km (the weather is taken per piece), and any corner left cut
+        shortest = [tighten(land, straighten(land, leg, piece_km=20.0)) for leg in shortest]
     r = smoothed(join_legs(shortest))
     need_kn = r.km / hours / 1.852
     if need_kn > max(speeds_kn):
@@ -133,9 +165,10 @@ def plan(graph: Graph, ship: Ship, forecast: Forecast, start, goal, departure, d
     offered = sorted({*speeds_kn, kn})
     choice = SpeedChoice([cost(k) for k in offered])
     prices = list(prices or [])
+    ways = [] if land is not None and len(nodes) == 2 else None  # every way the price search finds, each finished below
     if legs == "shared":
         f, tries = meet_eta(graph, nodes[0], nodes[-1], choice, hours, max_tries=max_tries, max_seconds=max_seconds,
-                            via=nodes[1:-1], price=(prices or [None])[0])
+                            via=nodes[1:-1], price=(prices or [None])[0], found=ways)
         out["tries"] = [tries]
     else:
         found, out["tries"], at = [], [], departure
@@ -145,22 +178,82 @@ def plan(graph: Graph, ship: Ship, forecast: Forecast, start, goal, departure, d
                 out["tries"].append([])
                 continue
             f, tries = meet_eta(graph, a, b, SpeedChoice([cost(k, at) for k in offered]), hours * leg.km / sum(r.km for r in shortest),
-                                max_tries=max_tries, max_seconds=max_seconds, price=prices[i] if i < len(prices) else None)
+                                max_tries=max_tries, max_seconds=max_seconds, price=prices[i] if i < len(prices) else None, found=ways)
             out["tries"].append(tries)
             if f is None:
                 break
             found.append(f)
             at = at + np.timedelta64(int(round(f.clock[-1] * 3600)), "s")
         f = join_legs(found) if f is not None else None
-    if f is None:
+    if f is None and not ways:
         out["error"] = "속력을 골라 가는 경로 중 도착 기한 안에 닿는 것을 찾지 못했어요."
         return out
     out["prices"] = [min((t["per_hour"] for t in tries if t["in_time"]), default=None) for tries in out["tries"]]  # the lowest that arrived in time
-    if land is not None:
-        f = choice.fill_slack(choice.snap_up(smoothed(choice.shortcut(land, f, waypoints(f)))), hours)
+    met = [p for p in out["prices"] if p is not None]
+    # None arrived in time on the cells (finished, one may still): the highest price tried, time being short
+    price = float(np.mean(met)) if met else max(t["per_hour"] for tries in out["tries"] for t in tries)
+
+    open_sea = None if land is None else open_water(graph, land)  # arcs over it need no land lookup
+
+    def finish(f, slack=True):
+        """A way found, from the start point (start_exact), its corners cut, relaxed and smoothed, and its speeds chosen
+        again for the deadline. None if it cannot arrive in time and not slack (else its slack is filled the old way)."""
+        if exact:  # the first segment at the speed the path set out at
+            k = choice.speed_index(f)
+            k = np.r_[k[0], k]
+            g = lead_in(f)
+            f_clock, f_kg, _ = choice.sail(dataclasses.replace(g, clock=np.r_[f.clock[0], g.clock[1:]]), k)
+            f = dataclasses.replace(g, clock=f_clock, cost=float(f_kg[k, np.arange(len(k))].sum()))
+        if land is not None:
+            f = choice.shortcut(land, f, waypoints(f), open_sea=open_sea)
+            f = choice.snap_up(smoothed(choice.relax(land, f, waypoints(f), open_sea=open_sea)))
+            try:
+                f = choice.retime(f, hours, per_hour=price)
+            except ValueError:  # no speeds on this way arrive in time as the buckets see it
+                if not slack:
+                    return None
+                f = choice.fill_slack(f, hours)
+        return f
+
+    kept, f = f, None if f is None else finish(f)
+    out["kept_t"] = None if f is None else round(f.cost / 1000, 2)  # the way the price search kept, finished
+    if ways is not None:  # finished, a way searched at another price, even one that arrived late, may burn less: keep the cheapest
+        # The same cells at other speeds count as another way: shortcut and relax judge each move at its speed.
+        out["ways_t"], seen = [], [] if kept is None else [(kept.lat, kept.lon, choice.speed_index(kept), "kept")]
+        out["ways_same_as"] = []  # per way: None, or the earlier way ("kept" or its index) it repeats
+        for i, w in enumerate(ways):
+            k = choice.speed_index(w)
+            same = next((n for a, b, c, n in seen if np.array_equal(w.lat, a) and np.array_equal(w.lon, b) and np.array_equal(k, c)), None)
+            out["ways_same_as"].append(same)
+            if same is not None:
+                out["ways_t"].append(None)
+                continue
+            seen.append((w.lat, w.lon, k, i))
+            g = finish(w, slack=False)
+            out["ways_t"].append(None if g is None else round(g.cost / 1000, 2))
+            if g is not None and (f is None or g.cost < f.cost):
+                f = g
+        if f is None:  # off the cells' detours, still none in time
+            out["error"] = "속력을 골라 가는 경로 중 도착 기한 안에 닿는 것을 찾지 못했어요."
+            return out
+    on_shortest = False
+    if keep_shortest:  # the shortest route with its speeds chosen too may beat the way found (open sea, mild weather)
+        s = dataclasses.replace(r, clock=clock, cost=fuel)
+        # and so may the shortest route moved sideways where the weather makes that cheaper: the
+        # search on the cells' steps need not come near it
+        out["shortest_finished_t"] = []  # the shortest route, then it moved sideways: speeds chosen again
+        for way, kept in ((s, True), *(((choice.snap_up(choice.relax(land, s, waypoints(s), open_sea=open_sea)), False),) if land is not None else ())):
+            try:
+                g = choice.retime(way, hours, per_hour=price)
+            except ValueError:
+                out["shortest_finished_t"].append(None)
+                continue
+            out["shortest_finished_t"].append(round(g.cost / 1000, 2))
+            if g.cost < f.cost:
+                f, on_shortest = g, kept
     out["least_fuel"] = describe(f, f.cost, choice.speeds_kn(f), float(f.clock[-1] - f.clock[0]), time.perf_counter() - t0)
-    out["least_fuel"]["is_shortest"] = bool(keep_shortest and f.cost > fuel)
-    if out["least_fuel"]["is_shortest"]:  # the way and speeds found burn more than the shortest route as it sails, also in time: keep that
+    out["least_fuel"]["is_shortest"] = bool(on_shortest or (keep_shortest and f.cost > fuel))
+    if keep_shortest and f.cost > fuel:  # the way and speeds found burn more than the shortest route as it sails, also in time: keep that
         out["least_fuel"] = {**out["shortest"], "seconds": out["least_fuel"]["seconds"], "is_shortest": True}
         f = dataclasses.replace(r, clock=clock)
     ends = [0, *waypoints(f), len(f.lat) - 1]
@@ -181,8 +274,8 @@ def describe(r: SearchResult, fuel_kg: float, speeds_kn, hours: float, seconds: 
         "speeds_kn": {f"{v:g}": int(n) for v, n in zip(*np.unique(np.round(speeds_kn, 2), return_counts=True))},
         "links": r.links,
         "seconds": round(seconds, 1),
-        "lat": np.round(r.lat, 4).tolist(),
-        "lon": np.round(r.lon, 4).tolist(),
+        "lat": np.round(r.lat, 6).tolist(),
+        "lon": np.round(r.lon, 6).tolist(),
         "on_link": r.on_link.tolist(),
         "segment_kn": np.round(speeds_kn, 2).tolist(),
     }
